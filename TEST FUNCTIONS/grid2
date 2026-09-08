@@ -1,0 +1,82 @@
+// Fonction pour afficher un aperçu ASCII de la densité
+fn print_density_preview(grid: &Grid2) {
+    const PREVIEW_HEIGHT: usize = 20;
+    const PREVIEW_WIDTH: usize = 70;
+
+    // Caractères pour représenter différentes densités
+    let density_chars = " .:-=+*#%@";
+    let max_char_idx = density_chars.len() - 1;
+
+    // Échantillonner la grille
+    let step_i = grid.width / PREVIEW_WIDTH;
+    let step_j = grid.height / PREVIEW_HEIGHT;
+
+    println!("Aperçu de la densité:");
+    println!("{}", "-".repeat(PREVIEW_WIDTH + 2));
+
+    for j in (0..grid.height).step_by(step_j) {
+        print!("|");
+        for i in (0..grid.width).step_by(step_i) {
+            let cell = grid.cell_idx(i, j);
+
+            // Afficher les cellules solides avec '#'
+            if cell.is_solid() {
+                print!("#");
+                continue;
+            }
+
+            // Normaliser la densité entre 0 et 1, puis mappez-la aux caractères
+            let density = (cell.density.back).min(1.0).max(0.0);
+            let char_idx = (density * max_char_idx as f32) as usize;
+            let density_char = density_chars.chars().nth(char_idx).unwrap_or(' ');
+
+            print!("{}", density_char);
+        }
+        println!("|");
+    }
+
+    println!("{}", "-".repeat(PREVIEW_WIDTH + 2));
+}
+
+// Pour visualiser le champ de vélocité (optionnel)
+fn _print_velocity_field(grid: &Grid2) {
+    const PREVIEW_HEIGHT: usize = 20;
+    const PREVIEW_WIDTH: usize = 70;
+
+    // Échantillonner la grille
+    let step_i = grid.width / PREVIEW_WIDTH;
+    let step_j = grid.height / PREVIEW_HEIGHT;
+
+    println!("Champ de vélocité:");
+    println!("{}", "-".repeat(PREVIEW_WIDTH + 2));
+
+    for j in (0..grid.height).step_by(step_j) {
+        print!("|");
+        for i in (0..grid.width).step_by(step_i) {
+            let cell = grid.cell_idx(i, j);
+
+            if cell.is_solid() {
+                print!("#");
+                continue;
+            }
+
+            // Déterminer la direction dominante de la vélocité
+            let vel_x = cell.velocity.back.x;
+            let vel_y = cell.velocity.back.y;
+            let vel_mag = (vel_x * vel_x + vel_y * vel_y).sqrt();
+
+            let char = if vel_mag < 0.1 {
+                '·'
+            } else if vel_x.abs() > vel_y.abs() {
+                if vel_x > 0.0 { '→' } else { '←' }
+            } else {
+                if vel_y > 0.0 { '↓' } else { '↑' }
+            };
+
+            print!("{}", char);
+        }
+        println!("|");
+    }
+
+    println!("{}", "-".repeat(PREVIEW_WIDTH + 2));
+}*/
