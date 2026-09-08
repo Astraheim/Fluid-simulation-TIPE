@@ -769,13 +769,13 @@ impl Grid {
 
     /// Impose u=0, v=0 in obstacles and walls, constant inflow on the left, outflow (∂/∂x=0) on the right and on the top/bottom
     // Modification de apply_boundary_conditions pour une staggered grid
-    pub fn apply_boundary_conditions(&mut self) {
+    pub fn apply_boundary_conditions(&mut self, inflow_velocity: f32) {
         let n = N as usize;
 
         // Conditions aux limites pour la vitesse horizontale u
         for j in 1..=n {
             // Entrée à gauche (inflow)
-            self.set_u(1, j, INFLOW_VELOCITY);
+            self.set_u(1, j, inflow_velocity);
 
             // Sortie à droite (outflow): ∂u/∂x = 0
             self.set_u(n+1, j, self.get_u(n, j));
@@ -810,7 +810,7 @@ impl Grid {
 
         // Coin supérieur gauche
         if !self.cells[self.to_index(1, 1)].wall {
-            self.set_u(1, 1, INFLOW_VELOCITY);
+            self.set_u(1, 1, inflow_velocity);
             self.set_v(1, 1, 0.0);
         }
 
@@ -822,7 +822,7 @@ impl Grid {
 
         // Coin inférieur gauche
         if !self.cells[self.to_index(1, n)].wall {
-            self.set_u(1, n, INFLOW_VELOCITY);
+            self.set_u(1, n, inflow_velocity);
             self.set_v(1, n+1, 0.0);
         }
 
@@ -1069,7 +1069,7 @@ impl Grid {
 
 
     /// Create a wind tunnel like setup to test as in wind tunnel experiments
-    pub fn initialize_wind_tunnel(&mut self, density: f32, hole_positions: &[usize]) {
+    pub fn initialize_wind_tunnel(&mut self, density: f32, flow_velocity: f32, hole_positions: &[usize]) {
         let left_wall = 1;
         let box_width = (N as usize / 30).max(2); // Width of the box
         let right_wall = left_wall + box_width;
@@ -1094,7 +1094,7 @@ impl Grid {
             for j in 2..=N as usize - 1 {
                 let idx = self.to_index(i, j);
                 if !self.cells[idx].wall { // Ensure this is not a wall
-                    self.cell_init(i, j, FLOW_VELOCITY, 0.0, density);
+                    self.cell_init(i, j, flow_velocity, 0.0, density);
                 }
             }
         }
@@ -1147,7 +1147,7 @@ impl Grid {
 
 
     /// Perform a step in the simulation with another method
-    pub fn vel2_step(&mut self) {
+    pub fn vel2_step(&mut self, inflow_velocity : f32) {
         if PROJECT == "1"{
             self.project();
         } else if PROJECT == "2"{
@@ -1162,13 +1162,13 @@ impl Grid {
         //println!("Total density after advect velocity {:2}", self.total_density());
         self.advect_density(DT);
         //println!("Total density after apres advect density {:2}", self.total_density());
-        self.apply_boundary_conditions();
+        self.apply_boundary_conditions(inflow_velocity);
     }
 
 
 
     /// Perform a step in the simulation with cip-csl4 method (not working)
-    pub fn vel_step_cip_csl4(&mut self) {
+    pub fn vel_step_cip_csl4(&mut self, inflow_velocity : f32) {
         // Diffusion only if needed
         // self.diffuse(VISCOSITY, DT);
 
@@ -1188,7 +1188,7 @@ impl Grid {
         //Self::advect_density_cip_csl4(self, DT);
 
         // Apply boundary conditions
-        self.apply_boundary_conditions();
+        self.apply_boundary_conditions(inflow_velocity);
     }
 
 

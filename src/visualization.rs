@@ -136,6 +136,7 @@ pub fn bresenham_line(x0: usize, y0: usize, x1: usize, y1: usize) -> Vec<(usize,
     points
 }
 
+/*
 /// Launch the simulation and rendering and handle user input
 pub fn run_simulation(grid: &mut Grid, mut step: i32) {
     let start = Instant::now();
@@ -360,9 +361,10 @@ pub fn run_simulation(grid: &mut Grid, mut step: i32) {
         }
     }
 }
+*/
 
 
-pub fn run_simulation2(grid2: &mut Grid2) {
+/* pub fn run_simulation2(grid2: &mut Grid2) {
     let start = Instant::now();
     let width = WINDOW_WIDTH;
     let height = WINDOW_HEIGHT;
@@ -566,7 +568,7 @@ pub fn run_simulation2(grid2: &mut Grid2) {
             let hole_pos: Vec<usize> = (1..=N as usize)
                 .filter(|&x| x % FLOW_SPACE == 0)
                 .collect();
-            
+
             grid2.initialize_wind_tunnel(FLOW_DENSITY, &*hole_pos, FLOW_VELOCITY);
 
             /*// Apply flow at inlet positions
@@ -635,7 +637,7 @@ pub fn run_simulation2(grid2: &mut Grid2) {
                                         false => {
                                             cell.velocity.back.x = -dj / radius as f32 * CENTER_SOURCE_VELOCITY;
                                             cell.velocity.back.y = di / radius as f32 * CENTER_SOURCE_VELOCITY;
-                                        } 
+                                        }
                                     }
                                 }
                             }
@@ -648,7 +650,7 @@ pub fn run_simulation2(grid2: &mut Grid2) {
         // Perform a simulation step with Grid2
 
         //grid2.cell_init(100,100,0.0,0.0,30.0);
-        
+
         //grid2.vel_step(DT, gravity);
 
         /*grid2.apply_forces(DT, gravity);
@@ -675,6 +677,8 @@ pub fn run_simulation2(grid2: &mut Grid2) {
         }
     }
 }
+
+ */
 
 // Helper function to calculate vorticity at a specific cell in Grid2
 fn calculate_vorticity2(grid: &Grid2, i: usize, j: usize) -> f32 {

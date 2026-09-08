@@ -1,15 +1,16 @@
 use crate ::grid2::*;
 use std::time::{Instant};
 use crate::conditions::*;
-use crate::visualization::{run_simulation,run_simulation2};
 use crate::grid::*;
 pub mod grid;
 pub mod conditions;
 pub mod visualization;
+pub mod ship;
 mod pressure_computation;
 mod objects;
 mod grid2;
 mod pressure_computation2;
+mod app;
 
 fn main() {
     let start = Instant::now();
@@ -32,7 +33,7 @@ fn main() {
 
         Grid::setup_splitter(&mut grid, 5.0, 80.0, 20.0, 30.0);
 
-        run_simulation(&mut grid, 0);
+        //run_simulation(&mut grid, 0);
         
         
         println!("Global density {:2}", grid.total_density());
@@ -65,9 +66,18 @@ fn main() {
             grid2.vel_step(DT, _zero);
         }*/
         
-        run_simulation2(&mut grid2);
+        //run_simulation2(&mut grid2);
         
         
+    }
+
+    else if GRID == "3" {
+
+        let mut grid = Grid::new();
+
+        Grid::setup_splitter(&mut grid, 5.0, 80.0, 20.0, 30.0);
+
+        app::run_app(grid)
     }
 
     let duration = start.elapsed();

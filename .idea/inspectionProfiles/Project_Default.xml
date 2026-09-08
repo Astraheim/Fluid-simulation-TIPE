@@ -6,5 +6,6 @@
         <language minSize="95" name="Rust" />
       </Languages>
     </inspection_tool>
+    <inspection_tool class="RsDetachedFile" enabled="false" level="WARNING" enabled_by_default="false" />
   </profile>
 </component>

@@ -27,7 +27,7 @@ pub const WINDOW_WIDTH: usize = if ADAPT_TO_WINDOW == true { (N as usize +2) * D
 
 
 // Simulation parameters
-pub const GRID : &str = "1"; // "1" for grid, "2" for grid2
+pub const GRID : &str = "3"; // "1" for grid, "2" for grid2
 pub const SIM_STEPS : usize = 5000; // Potentially the number of simulation steps
 pub const PRINT_FORCES : bool = true; // Print forces
 pub const OBJET_SIZE_PRINT_LIMIT : usize = 10; //Limit size for the object forces to be printed
@@ -82,4 +82,6 @@ pub const VISCOSITY: f32 = 0.000; // A bit of viscosity for Karman vortex
 pub const LOG: bool = false; // Log simulation data
 
 
-
+// Ship parameters
+pub const W_DRAG: f32 = 1.0;
+pub const W_TORQUE: f32 = 1.0;
