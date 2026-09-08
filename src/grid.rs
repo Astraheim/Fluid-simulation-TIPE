@@ -429,19 +429,6 @@ impl Grid {
         }
     }
 
-    /// Process average vertical velocity
-    fn avg_v(&self, i: usize, j: usize) -> f32 {
-        let n = N + 1.0 ;
-        0.5 * (self.cells[i * n as usize + j].velocity_y + self.cells[i * n as usize + j + 1].velocity_y)
-    }
-
-    /// Process average horizontal velocity
-    fn avg_u(&self, i: usize, j: usize) -> f32 {
-        let n = N;
-        0.5 * (self.cells[i * n as usize + j].velocity_x + self.cells[(i + 1) * n as usize + j].velocity_x)
-    }
-
-
 
     /// Advect density in the grid
     // Modification de advect_density pour une staggered grid
@@ -556,7 +543,7 @@ impl Grid {
         let n = N as isize;
         let center_x = n / 2;
         let center_y = n / 2;
-        let square_size = (size * 0.6) as f32;
+        let square_size = size * 0.6;
 
         // Central square
         self.square(center_x, center_y, square_size);
@@ -575,7 +562,7 @@ impl Grid {
         let bot_end_x = attach_x - dx;
         let bot_end_y = attach_y + dy;
 
-        // Draw thick bars (5px width)
+        // Draw thick bars (5 px width)
         for offset in -2isize..=2isize {
             // Upper bar
             self.draw_line(attach_x, attach_y + offset, top_end_x, top_end_y + offset);
@@ -1145,7 +1132,9 @@ impl Grid {
         if PROJECT == "1"{
             self.project();
         } else if PROJECT == "2"{
-            //self.project2(80, DT, 1.9);
+            panic!("PROJECT2 non implémenté pour le moment");
+        } else {
+            panic!("Valeur PROJECT invalide");
         }
         //println!("Total density after project {:2}", self.total_density());
         self.advect_velocity(DT);
@@ -1162,7 +1151,9 @@ impl Grid {
         if PROJECT == "1"{
             self.project();
         } else if PROJECT == "2"{
-            //self.project2(80, DT, 1.9);
+            panic!("PROJECT2 non implémenté pour le moment");
+        } else {
+            panic!("Valeur PROJECT invalide");
         }
         //println!("Total density after project {:2}", self.total_density());
         self.extrapolate();
@@ -1184,15 +1175,17 @@ impl Grid {
         // Projection to ensure incompressibility
         if PROJECT == "1"{
             self.project();
-        } else if PROJECT == "2" {
-            //self.project2(80, DT, 1.9);
+        } else if PROJECT == "2"{
+            panic!("PROJECT2 non implémenté pour le moment");
+        } else {
+            panic!("Valeur PROJECT invalide");
         }
 
         // Velocity advection
         self.advect_velocity(DT);
 
         // Use CIP-CSL4 method over other ones
-        Self::advect_density_cip_csl4(self, DT);
+        //Self::advect_density_cip_csl4(self, DT);
 
         // Apply boundary conditions
         self.apply_boundary_conditions();

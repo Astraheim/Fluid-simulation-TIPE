@@ -6,7 +6,6 @@ use crate::grid::*;
 pub mod grid;
 pub mod conditions;
 pub mod visualization;
-pub mod cip_csl4;
 mod pressure_computation;
 mod objects;
 mod grid2;

@@ -3,7 +3,6 @@ use crate::grid::*;
 use crate::grid2::*;
 use minifb::{Window, WindowOptions};
 use std::time::Instant;
-use crate::conditions;
 use crate::grid2::*;
 
 /*
@@ -327,7 +326,7 @@ pub fn run_simulation(grid: &mut Grid, mut step: i32) {
         }
 
 
-        // Perform simulation step
+        // Perform a simulation step
         if GRID == "1" {
             if VEL_STEP == "1" {
                 grid.vel_step();
@@ -431,11 +430,11 @@ pub fn run_simulation2(grid2: &mut Grid2) {
             // Convert mouse position to grid coordinates
             if let Some((mouse_x, mouse_y)) = mouse_pos {
                 let cell_size = grid2.cell_size;
-                let grid_x = (mouse_x as f32 / cell_size).floor() as usize;
-                let grid_y = (mouse_y as f32 / cell_size).floor() as usize;
+                let grid_x = (mouse_x  / cell_size).floor() as usize;
+                let grid_y = (mouse_y  / cell_size).floor() as usize;
                 let current_pos = (grid_x, grid_y);
 
-                // If there is a change in position since last click or first click
+                // If there's been a change in position since last click or first click
                 if last_grid_pos.is_none() || last_grid_pos.unwrap() != current_pos {
                     // Check if position is within grid bounds
                     if grid2.in_bounds(grid_x, grid_y) {
@@ -699,5 +698,5 @@ fn calculate_vorticity2(grid: &Grid2, i: usize, j: usize) -> f32 {
     let dvy_dx = (vy_right - vy_left) / (2.0 * grid.cell_size);
     let dvx_dy = (vx_up - vx_down) / (2.0 * grid.cell_size);
 
-    return dvy_dx - dvx_dy;
+    dvy_dx - dvx_dy
 }

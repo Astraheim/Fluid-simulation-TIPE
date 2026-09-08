@@ -456,7 +456,7 @@ impl Grid2 {
             self.cells[idx].s_tot_inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
         }
 
-        // CORRECTION: Initialisation de max_div avec 0.0 au lieu de std::f32::MAX
+        // CORRECTION : Initialisation de max_div avec 0.0 au lieu de std::f32::MAX
         let mut max_div = 0.0;
 
         // Vérification initiale de la divergence
@@ -563,14 +563,14 @@ impl Grid2 {
                     }
                 }
 
-                // AMÉLIORATION: Vérification de convergence
+                // AMÉLIORATION : Vérification de convergence
                 if LOG == true {
                     if iter % 5 == 0 {  // Affichage tous les 5 itérations pour éviter de spammer
                         println!("Itération {}: divergence max = {:.6}", iter, current_max_div);
                     }
                 }
 
-                // CORRECTION: Mise à jour de max_div
+                // CORRECTION : Mise à jour de max_div
                 max_div = current_max_div;
 
                 // Sortir si la convergence est suffisante
@@ -667,7 +667,7 @@ impl Grid2 {
                 // Échantillonnage bilinéaire de la vitesse à cette position
                 let vel = self.sample_velocity_at(pos_x, pos_y);
 
-                // Position de départ de la particule (méthode de "backtracing")
+                // Position de départ de la particule (méthode de "backtracking")
                 let start_x = pos_x - dt * vel.x;
                 let start_y = pos_y - dt * vel.y;
 
@@ -763,7 +763,7 @@ impl Grid2 {
                 let get_density = |i: usize, j: usize| -> f32 {
                     let idx = self.idx(i, j);
                     if self.cells[idx].cell_type == Cell2Type::Solid {
-                        // Réflexion: utiliser la densité de la cellule actuelle
+                        // Réflexion : utiliser la densité de la cellule actuelle
                         cell.density.back
                     } else {
                         self.cells[idx].density.back
@@ -857,7 +857,7 @@ impl Grid2 {
     // Extrapolation des vitesses aux bords
     // Amélioration de l'extrapolation des vitesses aux bords pour éviter la propagation d'erreurs
     fn extrapolate_velocity(&mut self) {
-        // MODIFICATION: Vérification des valeurs avant extrapolation
+        // MODIFICATION : Vérification des valeurs avant extrapolation
         let mut has_non_zero = false;
 
         // Extrapolation horizontale (pour u)
