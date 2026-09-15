@@ -75,7 +75,7 @@ fn main() {
 
         let mut grid = Grid::new();
 
-        Grid::setup_splitter(&mut grid, 5.0, 80.0, 20.0, 30.0);
+        Grid::triangle(&mut grid, 100, 250, 20.0);
 
         app::run_app(grid)
     }

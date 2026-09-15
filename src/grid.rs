@@ -350,13 +350,12 @@ impl Grid {
 
                 // Interpoler la vitesse u
                 let sample_u = |i: usize, j: usize| -> f32 {
-                    if i > 0 && i <= N as usize && j > 0 && j < N as usize {
-                        let idx = self.to_index(i, j);
-                        if !self.cells[idx].wall {
-                            return self.cells[idx].velocity_x;
+                    if let Some(idx) = self.try_index(i, j) {
+                        if self.cells[idx].wall {
+                            return 0.0;
                         }
                     }
-                    0.0 // Paroi ou hors limites
+                    self.get_u(i, j)
                 };
 
                 new_u[idx] = s0 * (t0 * sample_u(i0, j0) + t1 * sample_u(i0, j1)) +
@@ -408,13 +407,10 @@ impl Grid {
 
                 // Interpoler la vitesse v
                 let sample_v = |i: usize, j: usize| -> f32 {
-                    if i > 0 && i < N as usize && j > 0 && j <= N as usize {
-                        let idx = self.to_index(i, j);
-                        if !self.cells[idx].wall {
-                            return self.cells[idx].velocity_y;
-                        }
+                    if let Some(idx) = self.try_index(i, j) {
+                        if self.cells[idx].wall { return 0.0; }
                     }
-                    0.0 // Paroi ou hors limites
+                    self.get_v(i, j)
                 };
 
                 new_v[idx] = s0 * (t0 * sample_v(i0, j0) + t1 * sample_v(i0, j1)) +
@@ -594,7 +590,7 @@ impl Grid {
     
 
     /// Project the velocity field to ensure incompressibility
-    // Modification de project pour une staggered grid
+    // Modification of project to work with staggered grid and walls
     pub fn project(&mut self) {
         let h = 1.0 / N;
         let mut pressure = vec![0.0; SIZE as usize];
@@ -672,36 +668,34 @@ impl Grid {
         // Appliquer le gradient de pression pour corriger les vitesses
         for i in 1..=(N as usize + 1) {
             for j in 1..=(N as usize) {
-                if i <= N as usize {  // Ne pas aller au-delà de la dernière cellule horizontale
-                    let idx = self.to_index(i, j);
-                    if !self.cells[idx].wall {
-                        // Corriger u(i,j) (vitesse horizontale à la face de gauche de la cellule)
-                        let p_left = if i > 1 {
-                            pressure[self.to_index(i-1, j)]
-                        } else {
-                            pressure[idx] // Réflexion à la frontière
-                        };
-                        let p_right = pressure[idx];
+                // Ne pas aller au-delà de la dernière cellule horizontale
+                let idx = self.to_index(i, j);
+                if !self.cells[idx].wall {
+                    // Corriger u(i,j) (vitesse horizontale à la face de gauche de la cellule)
+                    let p_left = if i > 1 {
+                        pressure[self.to_index(i-1, j)]
+                    } else {
+                        pressure[idx] // Réflexion à la frontière
+                    };
+                    let p_right = pressure[idx];
 
-                        // Gradient de pression : ∂p/∂x
-                        self.cells[idx].velocity_x -= (p_right - p_left) / h;
-                    }
+                    // Gradient de pression : ∂p/∂x
+                    self.cells[idx].velocity_x -= (p_right - p_left) / h;
                 }
 
-                if j <= N as usize {  // Ne pas aller au-delà de la dernière cellule verticale
+                // Ne pas aller au-delà de la dernière cellule verticale
                     let idx = self.to_index(i, j);
-                    if !self.cells[idx].wall {
-                        // Corriger v(i,j) (vitesse verticale à la face du bas de la cellule)
-                        let p_bottom = if j > 1 {
-                            pressure[self.to_index(i, j-1)]
-                        } else {
-                            pressure[idx] // Réflexion à la frontière
-                        };
-                        let p_top = pressure[idx];
+                if !self.cells[idx].wall {
+                    // Corriger v(i,j) (vitesse verticale à la face du bas de la cellule)
+                    let p_bottom = if j > 1 {
+                        pressure[self.to_index(i, j-1)]
+                    } else {
+                        pressure[idx] // Réflexion à la frontière //
+                    };
+                    let p_top = pressure[idx];
 
-                        // Gradient de pression: ∂p/∂y
-                        self.cells[idx].velocity_y -= (p_top - p_bottom) / h;
-                    }
+                    // Gradient de pression: ∂p/∂y
+                    self.cells[idx].velocity_y -= (p_top - p_bottom) / h;
                 }
             }
         }
@@ -1155,6 +1149,7 @@ impl Grid {
         } else {
             panic!("Valeur PROJECT invalide");
         }
+        self.apply_boundary_conditions(inflow_velocity);
         //println!("Total density after project {:2}", self.total_density());
         self.extrapolate();
         //println!("Total density after extrapolate {:2}", self.total_density());
