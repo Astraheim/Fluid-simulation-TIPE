@@ -67,8 +67,6 @@ fn main() {
         }*/
         
         //run_simulation2(&mut grid2);
-        
-        
     }
 
     else if GRID == "3" {
