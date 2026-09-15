@@ -153,7 +153,12 @@ impl Grid {
             });
         }
 
-        // For each wall cell, we accumulate the forces and the center of mass
+        // Single pass over the grid: accumulate center of mass + force, and
+        // collect the (small) list of wall cells with their object index.
+        // This list is reused just below for the torque, instead of doing
+        // one full grid scan PER OBJECT like the previous version did.
+        let mut wall_cells: Vec<(usize, usize, usize, usize)> = Vec::new();
+
         for (i, j, idx) in self.iter_morton() {
             if self.cells[idx].wall {
                 let obj_id = object_ids[idx];
@@ -168,29 +173,29 @@ impl Grid {
                     // Forces accumulation
                     objects[obj_idx].total_force.x += cell_forces[idx].x;
                     objects[obj_idx].total_force.y += cell_forces[idx].y;
+
+                    wall_cells.push((i, j, idx, obj_idx));
                 }
             }
         }
 
-        // Final computation of the center of mass and torque
+        // Finalize center of mass
         for obj in &mut objects {
             if obj.cell_count > 0 {
-                // Process center of mass
                 obj.center_of_mass.x /= obj.cell_count as f32;
                 obj.center_of_mass.y /= obj.cell_count as f32;
-
-                // Recalculating torque
-                for (i, j, idx) in self.iter_morton() {
-                    if self.cells[idx].wall && object_ids[idx] == obj.id {
-                        // Vecteur du centre de masse à la cellule
-                        let r_x = i as f32 - obj.center_of_mass.x;
-                        let r_y = j as f32 - obj.center_of_mass.y;
-
-                        // 2D Vectorial product : r × F = r_x*F_y - r_y*F_x
-                        obj.torque += r_x * cell_forces[idx].y - r_y * cell_forces[idx].x;
-                    }
-                }
             }
+        }
+
+        // Torque: one pass over the wall-cell list (not the whole grid,
+        // and not once per object).
+        for &(i, j, idx, obj_idx) in &wall_cells {
+            let com = objects[obj_idx].center_of_mass;
+            let r_x = i as f32 - com.x;
+            let r_y = j as f32 - com.y;
+
+            // 2D Vectorial product : r × F = r_x*F_y - r_y*F_x
+            objects[obj_idx].torque += r_x * cell_forces[idx].y - r_y * cell_forces[idx].x;
         }
 
         objects
