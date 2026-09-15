@@ -40,49 +40,42 @@ impl Grid {
 
 
     /// Process the forces of pressure caused by fluid on the walls of the grid
-    pub fn compute_wall_forces(&self) -> Vec<Vector2> {
-        let h = 1.0 / N; // Size of a cell
+    pub fn compute_wall_forces(&mut self) -> Vec<Vector2> {
+        self.refresh_wall_topology_cache();
+
+        let h = 1.0 / N;
         let mut forces = vec![Vector2::default(); self.cells.len()];
 
-        for (i, j, idx) in self.iter_morton() {
-            if !self.cells[idx].wall {
-                continue;
-            }
+        for &idx in &self.wall_cells_cache {
+            let (i, j) = self.decode_index(idx);
 
-            // Directions around wall cells
             let neighbors = [
-                (i.wrapping_sub(1), j, Vector2 { x: -1.0, y: 0.0 }), // left
-                (i + 1, j, Vector2 { x: 1.0, y: 0.0 }),              // right
-                (i, j.wrapping_sub(1), Vector2 { x: 0.0, y: -1.0 }), // bottom
-                (i, j + 1, Vector2 { x: 0.0, y: 1.0 }),              // top
+                (i.wrapping_sub(1), j, Vector2 { x: -1.0, y: 0.0 }),
+                (i + 1, j, Vector2 { x: 1.0, y: 0.0 }),
+                (i, j.wrapping_sub(1), Vector2 { x: 0.0, y: -1.0 }),
+                (i, j + 1, Vector2 { x: 0.0, y: 1.0 }),
             ];
 
             for &(ni, nj, normal) in &neighbors {
                 if let Some(nidx) = self.try_index(ni, nj) {
                     if !self.cells[nidx].wall {
-                        // Pressure force
                         let p = self.cells[nidx].pressure;
                         let vx = &self.cells[nidx].velocity_x;
                         let vy = &self.cells[nidx].velocity_y;
                         let v_normal = vx * normal.x + vy * normal.y;
-                        // Tangential velocity
                         let v_tang_x = vx - v_normal * normal.x;
                         let v_tang_y = vy - v_normal * normal.y;
 
-                        // Pression force (normal to the wall)
                         let f_pressure = -p * normal;
 
-                        // Drag force (opposite to the velocity)
-                        let drag_coef = 0.5; // Coefficient à ajuster
+                        let drag_coef = 0.5;
                         let f_drag_x = drag_coef * v_normal.abs() * v_normal * normal.x;
                         let f_drag_y = drag_coef * v_normal.abs() * v_normal * normal.y;
 
-                        // Wind shear force
                         let visc_coef = VISCOSITY;
                         let f_shear_x = visc_coef * v_tang_x;
                         let f_shear_y = visc_coef * v_tang_y;
 
-                        // Total force
                         forces[idx].x += (f_pressure.x + f_drag_x + f_shear_x) * h;
                         forces[idx].y += (f_pressure.y + f_drag_y + f_shear_y) * h;
                     }
@@ -93,55 +86,17 @@ impl Grid {
         forces
     }
 
-    /// Objects identification
-    pub fn identify_objects(&self) -> Vec<usize> {
-        let mut object_ids = vec![0; self.cells.len()];
-        let mut current_id = 1;
-        let mut stack = Vec::new();
-
-        for (i, j, idx) in self.iter_morton() {
-            if self.cells[idx].wall && object_ids[idx] == 0 {
-                // New object found
-                object_ids[idx] = current_id;
-                stack.push((i, j));
-
-                // Exploration of the object using Depth-First Search (DFS)
-                while let Some((ci, cj)) = stack.pop() {
-                    let neighbors = [
-                        (ci.wrapping_sub(1), cj), // left
-                        (ci + 1, cj),             // right
-                        (ci, cj.wrapping_sub(1)), // down
-                        (ci, cj + 1),             // top
-                    ];
-
-                    for &(ni, nj) in &neighbors {
-                        if let Some(nidx) = self.try_index(ni, nj) {
-                            if self.cells[nidx].wall && object_ids[nidx] == 0 {
-                                object_ids[nidx] = current_id;
-                                stack.push((ni, nj));
-                            }
-                        }
-                    }
-                }
-
-                current_id += 1;
-            }
-        }
-
-        object_ids
-    }
-
     /// Computes total forces on each object
-    pub fn compute_object_forces(&self) -> Vec<ObjectForce> {
+    pub fn compute_object_forces(&mut self) -> Vec<ObjectForce> {
+        // compute_wall_forces() rafraîchit le cache en interne (ne rescanne
+        // la grille que si des murs ont réellement changé depuis le dernier appel).
         let cell_forces = self.compute_wall_forces();
-        let object_ids = self.identify_objects();
-        let max_id = *object_ids.iter().max().unwrap_or(&0);
 
+        let max_id = self.max_object_id_cache;
         if max_id == 0 {
             return Vec::new();
         }
 
-        // Initialization of objects accumulators
         let mut objects = Vec::with_capacity(max_id);
         for id in 1..=max_id {
             objects.push(ObjectForce {
@@ -153,33 +108,26 @@ impl Grid {
             });
         }
 
-        // Single pass over the grid: accumulate center of mass + force, and
-        // collect the (small) list of wall cells with their object index.
-        // This list is reused just below for the torque, instead of doing
-        // one full grid scan PER OBJECT like the previous version did.
-        let mut wall_cells: Vec<(usize, usize, usize, usize)> = Vec::new();
+        let mut labeled_cells: Vec<(usize, usize, usize, usize)> =
+            Vec::with_capacity(self.wall_cells_cache.len());
 
-        for (i, j, idx) in self.iter_morton() {
-            if self.cells[idx].wall {
-                let obj_id = object_ids[idx];
-                if obj_id > 0 {
-                    let obj_idx = obj_id - 1;
+        for &idx in &self.wall_cells_cache {
+            let obj_id = self.object_ids_cache[idx];
+            if obj_id > 0 {
+                let obj_idx = obj_id - 1;
+                let (i, j) = self.decode_index(idx);
 
-                    // Accumulation in a center of mass
-                    objects[obj_idx].center_of_mass.x += i as f32;
-                    objects[obj_idx].center_of_mass.y += j as f32;
-                    objects[obj_idx].cell_count += 1;
+                objects[obj_idx].center_of_mass.x += i as f32;
+                objects[obj_idx].center_of_mass.y += j as f32;
+                objects[obj_idx].cell_count += 1;
 
-                    // Forces accumulation
-                    objects[obj_idx].total_force.x += cell_forces[idx].x;
-                    objects[obj_idx].total_force.y += cell_forces[idx].y;
+                objects[obj_idx].total_force.x += cell_forces[idx].x;
+                objects[obj_idx].total_force.y += cell_forces[idx].y;
 
-                    wall_cells.push((i, j, idx, obj_idx));
-                }
+                labeled_cells.push((i, j, idx, obj_idx));
             }
         }
 
-        // Finalize center of mass
         for obj in &mut objects {
             if obj.cell_count > 0 {
                 obj.center_of_mass.x /= obj.cell_count as f32;
@@ -187,25 +135,82 @@ impl Grid {
             }
         }
 
-        // Torque: one pass over the wall-cell list (not the whole grid,
-        // and not once per object).
-        for &(i, j, idx, obj_idx) in &wall_cells {
+        for &(i, j, idx, obj_idx) in &labeled_cells {
             let com = objects[obj_idx].center_of_mass;
             let r_x = i as f32 - com.x;
             let r_y = j as f32 - com.y;
-
-            // 2D Vectorial product : r × F = r_x*F_y - r_y*F_x
             objects[obj_idx].torque += r_x * cell_forces[idx].y - r_y * cell_forces[idx].x;
         }
 
         objects
     }
 
+    /// Objects identification (mise en cache — voir refresh_wall_topology_cache).
+    /// Gardée publique pour compatibilité, mais compute_wall_forces /
+    /// compute_object_forces n'appellent plus cette fonction en interne :
+    /// ils lisent directement le cache.
+    pub fn identify_objects(&mut self) -> Vec<usize> {
+        self.refresh_wall_topology_cache();
+        self.object_ids_cache.clone()
+    }
 
+    /// Recalcule la connectivité des murs (ids d'objets) et la liste des
+    /// cellules murales, mais seulement si la topologie a réellement changé
+    /// depuis le dernier appel (voir `wall_init` dans grid.rs, qui bascule
+    /// le drapeau `wall_topology_dirty`). Transforme
+    /// identify_objects/compute_wall_forces/compute_object_forces d'un
+    /// "scan complet de la grille à chaque frame" en "scan complet
+    /// seulement quand un mur est réellement ajouté".
+    fn refresh_wall_topology_cache(&mut self) {
+        if !self.wall_topology_dirty {
+            return;
+        }
+
+        let mut object_ids = vec![0; self.cells.len()];
+        let mut wall_cells = Vec::new();
+        let mut current_id = 1;
+        let mut stack = Vec::new();
+
+        for (i, j, idx) in self.iter_morton() {
+            if self.cells[idx].wall {
+                wall_cells.push(idx);
+
+                if object_ids[idx] == 0 {
+                    object_ids[idx] = current_id;
+                    stack.push((i, j));
+
+                    while let Some((ci, cj)) = stack.pop() {
+                        let neighbors = [
+                            (ci.wrapping_sub(1), cj),
+                            (ci + 1, cj),
+                            (ci, cj.wrapping_sub(1)),
+                            (ci, cj + 1),
+                        ];
+
+                        for &(ni, nj) in &neighbors {
+                            if let Some(nidx) = self.try_index(ni, nj) {
+                                if self.cells[nidx].wall && object_ids[nidx] == 0 {
+                                    object_ids[nidx] = current_id;
+                                    stack.push((ni, nj));
+                                }
+                            }
+                        }
+                    }
+
+                    current_id += 1;
+                }
+            }
+        }
+
+        self.max_object_id_cache = current_id - 1;
+        self.object_ids_cache = object_ids;
+        self.wall_cells_cache = wall_cells;
+        self.wall_topology_dirty = false;
+    }
 
 
     /// Identifies objects, compute forces and print them
-    pub fn print_object_forces(&self) {
+    pub fn print_object_forces(&mut self) {
         let objects = self.compute_object_forces();
 
         if objects.is_empty() {

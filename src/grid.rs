@@ -81,10 +81,18 @@ impl Grid {
 }
 
 #[derive(Clone, Debug)]
-    pub struct Grid {
+pub struct Grid {
     pub cells: Vec<Cell>,
+    /// True dès qu'un mur a été ajouté depuis le dernier calcul du cache
+    /// ci-dessous (voir `wall_init`, seule fonction qui pose un mur).
+    pub(crate) wall_topology_dirty: bool,
+    /// Liste en cache des indices des cellules murales (ordre morton).
+    pub(crate) wall_cells_cache: Vec<usize>,
+    /// Id d'objet par cellule en cache (0 = pas un mur), issu du dernier DFS.
+    pub(crate) object_ids_cache: Vec<usize>,
+    /// Id d'objet maximum en cache, issu du dernier DFS.
+    pub(crate) max_object_id_cache: usize,
 }
-
 
 
 #[derive(Clone, Debug)]
@@ -224,9 +232,13 @@ impl Grid {
     pub fn new() -> Self {
         let mut grid = Self {
             cells: vec![Cell::default(); SIZE as usize],
+            wall_topology_dirty: true,
+            wall_cells_cache: Vec::new(),
+            object_ids_cache: vec![0; SIZE as usize],
+            max_object_id_cache: 0,
         };
 
-        if EXT_BORDER == true{
+        if EXT_BORDER == true {
             for i in 0..=(N + 1.0) as usize {
                 for &j in &[0, (N + 1.0) as usize] {
                     if let Some(idx) = grid.try_index(i, j) {
@@ -234,19 +246,19 @@ impl Grid {
                     }
                 }
             }
-            for j in 0..=(N + 1.0) as usize {
-                for &i in &[0, (N + 1.0) as usize] {
-                    if let Some(idx) = grid.try_index(i, j) {
-                        grid.cells[idx].wall = true;
-                    }
+        for j in 0..=(N + 1.0) as usize {
+            for &i in &[0, (N + 1.0) as usize] {
+                if let Some(idx) = grid.try_index(i, j) {
+                    grid.cells[idx].wall = true;
                 }
             }
         }
-
-        grid
     }
+    grid
+}
 
-    /// Adds a source to the pressure of the cells
+
+/// Adds a source to the pressure of the cells
     pub fn add_source(&mut self, source: &[f32], dt: f32) {
         self.cells.par_iter_mut().enumerate().for_each(|(i, cell)| {
             cell.pressure += dt * source[i];
@@ -891,19 +903,23 @@ impl Grid {
         }
     }
 
-    /// Initialize the wall character of a cell
-    pub fn wall_init(&mut self, line: usize, column: usize, wall: bool) {
-        if line <= (N + 1.0) as usize && column <= (N + 1.0) as usize {
-            let idx = self.to_index(column, line);
-            if !self.cells[idx].wall {
-                self.cells[idx].wall = wall;
+        /// Initialize the wall character of a cell
+        pub fn wall_init(&mut self, line: usize, column: usize, wall: bool) {
+            if line <= (N + 1.0) as usize && column <= (N + 1.0) as usize {
+                let idx = self.to_index(column, line);
+                if !self.cells[idx].wall {
+                    self.cells[idx].wall = wall;
+                    if wall {
+                        // Un mur vient d'être posé : le cache objets/forces est périmé.
+                        self.wall_topology_dirty = true;
+                    }
+                } else {
+                    println!("Impossible to modify a wall!");
+                }
             } else {
-                println!("Impossible to modify a wall!");
+                println!("Error: indices out of bounds!");
             }
-        } else {
-            println!("Error: indices out of bounds!");
         }
-    }
 
     /// Initialize the velocity of a cell
     pub fn velocity_init(&mut self, line: usize, column: usize, vx: f32, vy: f32) {

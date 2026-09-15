@@ -169,16 +169,17 @@ pub fn run_app(mut grid: Grid) -> ! {
                         // donc pixel buffer == coordonnées grille directement.
                         if let Ok((gx, gy)) = pixels.window_pos_to_pixel((position.x as f32, position.y as f32)) {
                             if gx >= 1 && gx <= N as usize && gy >= 1 && gy <= N as usize {
-                                let idx = grid.to_index(gx, gy);
-                                grid.cells[idx].wall = true;
+                                // Passe par wall_init (au lieu d'une écriture directe de
+                                // grid.cells[idx].wall) pour que le cache objets/forces
+                                // sache qu'il doit se recalculer.
+                                grid.wall_init(gy, gx, true);
 
                                 // Trace un trait entre la dernière position et la position
                                 // actuelle si la souris a bougé vite (drag), comme avant.
                                 if let Some((lx, ly)) = last_grid_pos {
                                     for (x, y) in bresenham_line(lx, ly, gx, gy) {
                                         if x >= 1 && x <= N as usize && y >= 1 && y <= N as usize {
-                                            let idx = grid.to_index(x, y);
-                                            grid.cells[idx].wall = true;
+                                            grid.wall_init(y, x, true);
                                         }
                                     }
                                 }
