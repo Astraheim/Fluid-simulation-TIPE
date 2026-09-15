@@ -13,6 +13,14 @@ Idée générale :
       PAR CELLULE, avant l'agrégation par objet connexe. On s'en sert directement
       ici, donc même si un conteneur touche la coque et qu'ils fusionnent dans
       identify_objects(), on peut quand même isoler leur contribution respective.
+
+Nouveauté (session du jour) :
+    - `build_boat_layout` génère une ShipLayout (coque + conteneurs) à partir
+      de quelques paramètres géométriques et d'une organisation choisie
+      (Grille / Pyramide / Quinconce), pour pouvoir tester rapidement
+      différentes dispositions sans les écrire à la main.
+    - `quick_variants` renvoie directement 3 variantes prêtes à comparer via
+      `compare_layouts`.
 */
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -175,4 +183,119 @@ pub fn compare_layouts(layouts: &[ShipLayout], steps: usize, hole_pos: &[usize])
         );
     }
     println!("===================================================\n");
+}
+
+// ============================================================================
+// GÉNÉRATEUR DE BATEAU PARAMÉTRABLE
+// ============================================================================
+
+/// Organisation des conteneurs sur le pont.
+#[derive(Clone, Copy, Debug)]
+pub enum ContainerLayoutKind {
+    /// Rangées x colonnes régulières.
+    Grid { rows: usize, cols: usize },
+    /// Une rangée de `rows` niveaux, chaque niveau plus étroit que le précédent
+    /// (empilement en pyramide, base large en bas).
+    Pyramid { rows: usize },
+    /// Rangées x colonnes, avec un décalage d'une demi-largeur une rangée sur deux.
+    Staggered { rows: usize, cols: usize },
+}
+
+/// Paramètres géométriques pour générer rapidement un bateau + ses conteneurs.
+#[derive(Clone, Copy, Debug)]
+pub struct BoatParams {
+    /// Centre de la coque, en cellules de grille.
+    pub center: (isize, isize),
+    pub hull_width: f32,
+    pub hull_height: f32,
+    pub container_width: f32,
+    pub container_height: f32,
+    /// Espace (en cellules) entre deux conteneurs adjacents et entre la coque
+    /// et le premier niveau de conteneurs.
+    pub container_gap: f32,
+    pub kind: ContainerLayoutKind,
+    pub flow_angle: f32,
+}
+
+/// Construit une ShipLayout (coque rectangulaire + conteneurs empilés dessus)
+/// à partir de `BoatParams`. Les conteneurs sont empilés "vers le haut" (y
+/// décroissant) à partir du sommet de la coque.
+pub fn build_boat_layout(name: &str, p: &BoatParams) -> ShipLayout {
+    let hull_rects = vec![(p.center, p.hull_width, p.hull_height)];
+    let mut containers = Vec::new();
+    let mut id = 0usize;
+
+    let top_of_hull_y = p.center.1 - (p.hull_height / 2.0) as isize;
+    let step_x = p.container_width + p.container_gap;
+    let step_y = p.container_height + p.container_gap;
+
+    let mut push_row = |row: usize, cols_in_row: usize, x_offset: f32, containers: &mut Vec<Container>, id: &mut usize| {
+        let total_w = cols_in_row as f32 * step_x - p.container_gap;
+        let start_x = p.center.0 - (total_w / 2.0) as isize + x_offset as isize;
+        let cy = top_of_hull_y - (row as f32 * step_y) as isize - (p.container_height / 2.0) as isize - p.container_gap as isize;
+
+        for c in 0..cols_in_row {
+            let cx = start_x + (c as f32 * step_x + p.container_width / 2.0) as isize;
+            containers.push(Container {
+                id: *id,
+                center: (cx, cy),
+                width: p.container_width,
+                height: p.container_height,
+            });
+            *id += 1;
+        }
+    };
+
+    match p.kind {
+        ContainerLayoutKind::Grid { rows, cols } => {
+            for r in 0..rows {
+                push_row(r, cols, 0.0, &mut containers, &mut id);
+            }
+        }
+        ContainerLayoutKind::Pyramid { rows } => {
+            for r in 0..rows {
+                let cols_in_row = rows.saturating_sub(r).max(1);
+                push_row(r, cols_in_row, 0.0, &mut containers, &mut id);
+            }
+        }
+        ContainerLayoutKind::Staggered { rows, cols } => {
+            for r in 0..rows {
+                let offset = if r % 2 == 1 { step_x / 2.0 } else { 0.0 };
+                push_row(r, cols, offset, &mut containers, &mut id);
+            }
+        }
+    }
+
+    ShipLayout {
+        name: name.to_string(),
+        hull_rects,
+        containers,
+        flow_angle: p.flow_angle,
+    }
+}
+
+/// Génère 3 variantes courantes (grille / pyramide / quinconce) à partir des
+/// mêmes dimensions de base, prêtes à passer à `compare_layouts`.
+///
+/// Exemple d'utilisation dans main.rs :
+/// ```ignore
+/// let base = BoatParams {
+///     center: (N as isize / 2, N as isize / 2),
+///     hull_width: 30.0,
+///     hull_height: 60.0,
+///     container_width: 8.0,
+///     container_height: 8.0,
+///     container_gap: 1.0,
+///     kind: ContainerLayoutKind::Grid { rows: 3, cols: 3 }, // écrasé par quick_variants
+///     flow_angle: 0.0,
+/// };
+/// let variants = quick_variants(base);
+/// compare_layouts(&variants, 500, &hole_pos);
+/// ```
+pub fn quick_variants(base: BoatParams) -> Vec<ShipLayout> {
+    vec![
+        build_boat_layout("grille_3x3", &BoatParams { kind: ContainerLayoutKind::Grid { rows: 3, cols: 3 }, ..base }),
+        build_boat_layout("pyramide_4", &BoatParams { kind: ContainerLayoutKind::Pyramid { rows: 4 }, ..base }),
+        build_boat_layout("quinconce_3x3", &BoatParams { kind: ContainerLayoutKind::Staggered { rows: 3, cols: 3 }, ..base }),
+    ]
 }

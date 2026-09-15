@@ -1,9 +1,11 @@
 use crate::conditions::*;
-use crate::grid::Grid;
+use crate::grid::{Grid, ObjectForce};
+use crate::ship::{build_boat_layout, BoatParams, ContainerLayoutKind};
 use egui::Context;
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use pixels::{Pixels, SurfaceTexture};
 use pixels::wgpu; // réexporté par pixels : garantit la même version que celle utilisée en interne
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::event::{Event, WindowEvent};
@@ -15,19 +17,21 @@ Remplace run_simulation() de visualization.rs.
 
 Architecture :
     - winit : fenêtre + boucle d'événements
-    - pixels : buffer de pixels GPU-accéléré (même principe que le Vec<u32> de
-      minifb, mais le scaling DX/DY se fait sur le GPU -> on peut rendre à la
-      résolution de la grille N x N et laisser pixels agrandir, au lieu de
-      remplir les blocs DX*DY à la main comme avant)
-    - egui + egui-wgpu : UI immédiate par-dessus la texture pixels, dans la
-      même passe de rendu wgpu (pixels expose son wgpu::Device/Queue)
+    - pixels : buffer de pixels GPU-accéléré
+    - egui + egui-wgpu : UI immédiate par-dessus la texture pixels
 
-Note : les valeurs "réglables en direct" vivent dans SimParams, PAS dans les
-const de conditions.rs (celles-ci restent la config de démarrage / la
-structure figée de la grille : N, DX, DY, SIZE).
+Nouveautés (session du jour) :
+    - Affichage vorticité (bouton, réutilise le calcul de visualization.rs)
+    - Stylo réglable (taille) + mode "ligne droite" pour dessiner les murs
+    - Bouton "Step" pour avancer d'un seul pas quand la simulation est en pause
+    - Un graphe traînée + un graphe couple PAR objet détecté (au lieu d'un
+      graphe global agrégé)
+    - Panneau "Générateur de bateau" : construit une ShipLayout (coque +
+      conteneurs) suivant plusieurs organisations, pour tester vite (voir
+      ship.rs::build_boat_layout / ContainerLayoutKind)
 */
 
-/// Paramètres physiques modifiables sans recréer la grille.
+/// Paramètres modifiables sans recréer la grille.
 pub struct SimParams {
     pub flow_velocity: f32,
     pub flow_density: f32,
@@ -35,6 +39,9 @@ pub struct SimParams {
     pub w_drag: f32,
     pub w_torque: f32,
     pub paused: bool,
+    pub paint_vorticity: bool,
+    pub pen_size: usize,
+    pub straight_line_mode: bool,
 }
 
 impl Default for SimParams {
@@ -46,31 +53,77 @@ impl Default for SimParams {
             w_drag: 1.0,
             w_torque: 1.0,
             paused: false,
+            paint_vorticity: false,
+            pen_size: 1,
+            straight_line_mode: false,
         }
     }
 }
 
-/// Historique glissant pour le plot temps réel (traînée / couple)
-pub struct ForceHistory {
-    pub drag: Vec<[f64; 2]>,   // [step, valeur]
+/// Historique glissant traînée/couple pour UN objet détecté.
+pub struct ObjectHistory {
+    pub drag: Vec<[f64; 2]>,
     pub torque: Vec<[f64; 2]>,
+}
+
+/// Historiques séparés par id d'objet (au lieu d'un seul historique agrégé).
+pub struct ForceHistories {
+    pub per_object: HashMap<usize, ObjectHistory>,
     pub step: usize,
     pub max_points: usize,
 }
 
-impl ForceHistory {
+impl ForceHistories {
     fn new(max_points: usize) -> Self {
-        Self { drag: Vec::new(), torque: Vec::new(), step: 0, max_points }
+        Self { per_object: HashMap::new(), step: 0, max_points }
     }
 
-    fn push(&mut self, drag: f32, torque: f32) {
-        self.drag.push([self.step as f64, drag as f64]);
-        self.torque.push([self.step as f64, torque as f64]);
-        if self.drag.len() > self.max_points {
-            self.drag.remove(0);
-            self.torque.remove(0);
+    fn push(&mut self, objects: &[ObjectForce]) {
+        for obj in objects {
+            let entry = self.per_object.entry(obj.id).or_insert_with(|| ObjectHistory {
+                drag: Vec::new(),
+                torque: Vec::new(),
+            });
+            entry.drag.push([self.step as f64, obj.total_force.x as f64]);
+            entry.torque.push([self.step as f64, obj.torque as f64]);
+            if entry.drag.len() > self.max_points {
+                entry.drag.remove(0);
+                entry.torque.remove(0);
+            }
         }
         self.step += 1;
+    }
+
+    fn clear(&mut self) {
+        self.per_object.clear();
+        self.step = 0;
+    }
+}
+
+/// État des champs du panneau "Générateur de bateau".
+struct BoatUiState {
+    hull_width: f32,
+    hull_height: f32,
+    container_width: f32,
+    container_height: f32,
+    container_gap: f32,
+    kind_index: usize, // 0 = Grille, 1 = Pyramide, 2 = Quinconce
+    rows: usize,
+    cols: usize,
+}
+
+impl Default for BoatUiState {
+    fn default() -> Self {
+        Self {
+            hull_width: 30.0,
+            hull_height: 60.0,
+            container_width: 8.0,
+            container_height: 8.0,
+            container_gap: 1.0,
+            kind_index: 0,
+            rows: 3,
+            cols: 3,
+        }
     }
 }
 
@@ -86,9 +139,39 @@ fn density_color(density: f32) -> [u8; 4] {
     }
 }
 
-/// Rendu de la grille dans le buffer pixels, à résolution N x N (pas DX*DY,
-/// c'est pixels/wgpu qui agrandit à l'affichage -> plus de boucle de blocs).
-fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize) {
+/// Vorticity locale (reprise de visualization.rs, adaptée pour l'app egui/pixels)
+fn vorticity_at(grid: &Grid, i: usize, j: usize) -> f32 {
+    let dx = DX;
+    let dy = DY;
+
+    let im = i.saturating_sub(1).max(1);
+    let ip = (i + 1).min(N as usize);
+    let jm = j.saturating_sub(1).max(1);
+    let jp = (j + 1).min(N as usize);
+
+    let idx_up = grid.to_index(i, jp);
+    let idx_down = grid.to_index(i, jm);
+    let idx_left = grid.to_index(im, j);
+    let idx_right = grid.to_index(ip, j);
+
+    let du_dy = (grid.cells[idx_up].velocity_x - grid.cells[idx_down].velocity_x) / (2.0 * dy);
+    let dv_dx = (grid.cells[idx_right].velocity_y - grid.cells[idx_left].velocity_y) / (2.0 * dx);
+
+    dv_dx - du_dy
+}
+
+/// Couleur associée à une valeur de vorticité (bleu = positif, rouge = négatif)
+fn vorticity_color(vort: f32) -> [u8; 4] {
+    let iv = ((vort.abs().min(5.0)) * 51.0) as u8;
+    if vort > 0.0 {
+        [0, iv, 0xFF, 0xFF]
+    } else {
+        [0xFF, iv, 0, 0xFF]
+    }
+}
+
+/// Rendu de la grille dans le buffer pixels, à résolution N x N.
+fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, paint_vorticity: bool) {
     let n_max = N as usize + 1;
     for j in 1..n_max {
         for i in 1..n_max {
@@ -96,10 +179,32 @@ fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize) {
             let px = (j * grid_w + i) * 4;
             let color = if grid.cells[idx].wall {
                 [0, 0, 0, 255]
+            } else if paint_vorticity {
+                vorticity_color(vorticity_at(grid, i, j))
             } else {
                 density_color(grid.cells[idx].density)
             };
             frame[px..px + 4].copy_from_slice(&color);
+        }
+    }
+}
+
+/// Tamponne un mur de taille `pen_size` (diamètre approx.) centré sur (cx, cy).
+/// pen_size = 1 -> une seule cellule, comme avant.
+fn stamp_wall(grid: &mut Grid, cx: usize, cy: usize, pen_size: usize) {
+    let r = (pen_size as isize) / 2;
+    let cxi = cx as isize;
+    let cyi = cy as isize;
+
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r + 1 {
+                let x = cxi + dx;
+                let y = cyi + dy;
+                if x >= 1 && x <= N as isize && y >= 1 && y <= N as isize {
+                    grid.wall_init(y as usize, x as usize, true);
+                }
+            }
         }
     }
 }
@@ -111,23 +216,12 @@ pub fn run_app(mut grid: Grid) -> ! {
         .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64))
         .build(&event_loop)
         .unwrap();
-    let window = Arc::new(window); // Arc possédé (Send+Sync requis par wgpu::WindowHandle) -> Pixels 'static
+    let window = Arc::new(window);
 
     let grid_w = N as usize + 2;
     let grid_h = N as usize + 2;
 
-    // IMPORTANT : taille PHYSIQUE réelle de la fenêtre, pas les constantes
-    // logiques WINDOW_WIDTH/HEIGHT -- sur un écran avec mise à l'échelle
-    // Windows != 100%, les deux diffèrent, et pixels/egui ont besoin de la
-    // taille physique pour configurer correctement la surface et les zones
-    // de clip d'egui (sinon egui peut se retrouver rendu hors de la zone
-    // visible alors que la grille, elle, s'affiche normalement).
     let win_size = window.inner_size();
-
-    // On passe un CLONE possédé de l'Arc (pas une référence) : c'est ce qui donne
-    // un Pixels<'static> non lié à la durée de vie de `window`, et permet de
-    // déplacer `window` (l'Arc, pas cloné) dans la closure de l'event loop
-    // sans conflit d'emprunt.
     let surface_texture = SurfaceTexture::new(win_size.width, win_size.height, Arc::clone(&window));
     let mut pixels = Pixels::new(grid_w as u32, grid_h as u32, surface_texture).unwrap();
 
@@ -137,13 +231,16 @@ pub fn run_app(mut grid: Grid) -> ! {
     let mut egui_renderer = EguiRenderer::new(pixels.device(), pixels.render_texture_format(), None, 1);
 
     let mut params = SimParams::default();
-    let mut history = ForceHistory::new(500);
+    let mut history = ForceHistories::new(300);
+    let mut boat_ui = BoatUiState::default();
     let mut step: usize = 0;
     let start = Instant::now();
 
-    // État pour le dessin de murs à la souris (repris de l'ancien run_simulation)
+    // État pour le dessin de murs à la souris
     let mut mouse_down = false;
-    let mut last_grid_pos: Option<(usize, usize)> = None;
+    let mut last_grid_pos: Option<(usize, usize)> = None; // pour le mode "libre"
+    let mut line_anchor: Option<(usize, usize)> = None;   // pour le mode "ligne droite"
+    let mut last_cursor_pixel: Option<(usize, usize)> = None; // dernière position connue (grille)
 
     let hole_pos: Vec<usize> = (1..=N as usize).filter(|&x| x % FLOW_SPACE == 0).collect();
 
@@ -152,35 +249,47 @@ pub fn run_app(mut grid: Grid) -> ! {
             Event::WindowEvent { event, .. } => {
                 let response = egui_winit.on_window_event(&window, &event);
                 if response.consumed {
-                    // egui a géré l'événement (clic sur un slider, etc.) : pas de dessin de mur
+                    // egui a géré l'événement (clic sur un slider, etc.)
                 } else if let WindowEvent::CloseRequested = event {
                     elwt.exit();
                 } else if let WindowEvent::MouseInput { state, button, .. } = event {
                     if button == winit::event::MouseButton::Left {
-                        mouse_down = state == winit::event::ElementState::Pressed;
-                        if !mouse_down {
-                            last_grid_pos = None; // fin du tracé, prochaine pression = nouveau trait
+                        let pressed = state == winit::event::ElementState::Pressed;
+
+                        if pressed {
+                            mouse_down = true;
+                            if params.straight_line_mode {
+                                line_anchor = last_cursor_pixel;
+                            } else {
+                                last_grid_pos = None;
+                                if let Some((gx, gy)) = last_cursor_pixel {
+                                    stamp_wall(&mut grid, gx, gy, params.pen_size);
+                                    last_grid_pos = Some((gx, gy));
+                                }
+                            }
+                        } else {
+                            if params.straight_line_mode {
+                                if let (Some(start_p), Some(end_p)) = (line_anchor, last_cursor_pixel) {
+                                    for (x, y) in bresenham_line(start_p.0, start_p.1, end_p.0, end_p.1) {
+                                        stamp_wall(&mut grid, x, y, params.pen_size);
+                                    }
+                                }
+                                line_anchor = None;
+                            }
+                            mouse_down = false;
+                            last_grid_pos = None;
                         }
                     }
                 } else if let WindowEvent::CursorMoved { position, .. } = event {
-                    if mouse_down {
-                        // Conversion position souris (physique) -> coordonnées grille.
-                        // Le buffer pixels est rendu à résolution N x N (cf. draw_grid),
-                        // donc pixel buffer == coordonnées grille directement.
-                        if let Ok((gx, gy)) = pixels.window_pos_to_pixel((position.x as f32, position.y as f32)) {
-                            if gx >= 1 && gx <= N as usize && gy >= 1 && gy <= N as usize {
-                                // Passe par wall_init (au lieu d'une écriture directe de
-                                // grid.cells[idx].wall) pour que le cache objets/forces
-                                // sache qu'il doit se recalculer.
-                                grid.wall_init(gy, gx, true);
+                    if let Ok((gx, gy)) = pixels.window_pos_to_pixel((position.x as f32, position.y as f32)) {
+                        if gx >= 1 && gx <= N as usize && gy >= 1 && gy <= N as usize {
+                            last_cursor_pixel = Some((gx, gy));
 
-                                // Trace un trait entre la dernière position et la position
-                                // actuelle si la souris a bougé vite (drag), comme avant.
+                            if mouse_down && !params.straight_line_mode {
+                                stamp_wall(&mut grid, gx, gy, params.pen_size);
                                 if let Some((lx, ly)) = last_grid_pos {
                                     for (x, y) in bresenham_line(lx, ly, gx, gy) {
-                                        if x >= 1 && x <= N as usize && y >= 1 && y <= N as usize {
-                                            grid.wall_init(y, x, true);
-                                        }
+                                        stamp_wall(&mut grid, x, y, params.pen_size);
                                     }
                                 }
                                 last_grid_pos = Some((gx, gy));
@@ -188,23 +297,12 @@ pub fn run_app(mut grid: Grid) -> ! {
                         }
                     }
                 } else if let WindowEvent::RedrawRequested = event {
-                    // --- 1. Step physique (si pas en pause) ---
-                    if !params.paused {
-                        grid.initialize_wind_tunnel(params.flow_density, params.flow_velocity, &hole_pos);
-                        grid.vel2_step(params.flow_velocity);
-                        step += 1;
+                    // --- 1. UI egui (collectée avant le pas de simulation, pour
+                    //        que le bouton "Step" et "Appliquer bateau" agissent
+                    //        dès cette frame) ---
+                    let mut do_step = false;
+                    let mut apply_boat = false;
 
-                        // Exemple : couple/traînée globaux pour le plot
-                        let objects = grid.compute_object_forces();
-                        let total_torque: f32 = objects.iter().map(|o| o.torque.abs()).sum();
-                        let total_drag: f32 = objects.iter().map(|o| o.total_force.x).sum();
-                        history.push(total_drag, total_torque);
-                    }
-
-                    // --- 2. Rendu grille dans le buffer pixels ---
-                    draw_grid(&grid, pixels.frame_mut(), grid_w);
-
-                    // --- 3. UI egui ---
                     let raw_input = egui_winit.take_egui_input(&window);
                     let full_output = egui_ctx.run(raw_input, |ctx| {
                         egui::SidePanel::right("controls").show(ctx, |ui| {
@@ -215,10 +313,24 @@ pub fn run_app(mut grid: Grid) -> ! {
                             ui.separator();
                             ui.add(egui::Slider::new(&mut params.w_drag, 0.0..=5.0).text("Poids traînée"));
                             ui.add(egui::Slider::new(&mut params.w_torque, 0.0..=5.0).text("Poids couple"));
+
+                            ui.separator();
+                            ui.checkbox(&mut params.paint_vorticity, "Afficher la vorticité");
+
+                            ui.separator();
+                            ui.label("Dessin de murs");
+                            ui.add(egui::Slider::new(&mut params.pen_size, 1..=30).text("Taille du stylo"));
+                            ui.checkbox(&mut params.straight_line_mode, "Ligne droite (clic → relâcher)");
+
                             ui.separator();
                             if ui.button(if params.paused { "Reprendre" } else { "Pause" }).clicked() {
                                 params.paused = !params.paused;
                             }
+                            ui.add_enabled_ui(params.paused, |ui| {
+                                if ui.button("Step (1 pas)").clicked() {
+                                    do_step = true;
+                                }
+                            });
                             if ui.button("Screenshot").clicked() {
                                 save_screenshot(pixels.frame(), grid_w, grid_h, step);
                             }
@@ -226,20 +338,108 @@ pub fn run_app(mut grid: Grid) -> ! {
                             ui.label(format!("Step: {step}  |  t: {:.1}s", start.elapsed().as_secs_f32()));
 
                             ui.separator();
-                            ui.label("Traînée / Couple (temps réel)");
-                            egui_plot::Plot::new("forces_plot")
-                                .height(200.0)
-                                .show(ui, |plot_ui| {
-                                    plot_ui.line(egui_plot::Line::new(egui_plot::PlotPoints::from(history.drag.clone())).name("Traînée"));
-                                    plot_ui.line(egui_plot::Line::new(egui_plot::PlotPoints::from(history.torque.clone())).name("Couple"));
-                                });
+                            ui.collapsing("Générateur de bateau", |ui| {
+                                ui.add(egui::Slider::new(&mut boat_ui.hull_width, 5.0..=100.0).text("Largeur coque"));
+                                ui.add(egui::Slider::new(&mut boat_ui.hull_height, 5.0..=200.0).text("Hauteur coque"));
+                                ui.add(egui::Slider::new(&mut boat_ui.container_width, 2.0..=40.0).text("Largeur conteneur"));
+                                ui.add(egui::Slider::new(&mut boat_ui.container_height, 2.0..=40.0).text("Hauteur conteneur"));
+                                ui.add(egui::Slider::new(&mut boat_ui.container_gap, 0.0..=10.0).text("Espacement"));
+
+                                egui::ComboBox::from_label("Organisation")
+                                    .selected_text(match boat_ui.kind_index {
+                                        0 => "Grille",
+                                        1 => "Pyramide",
+                                        _ => "Quinconce",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut boat_ui.kind_index, 0, "Grille");
+                                        ui.selectable_value(&mut boat_ui.kind_index, 1, "Pyramide");
+                                        ui.selectable_value(&mut boat_ui.kind_index, 2, "Quinconce");
+                                    });
+
+                                ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=8).text("Rangées"));
+                                if boat_ui.kind_index != 1 {
+                                    ui.add(egui::Slider::new(&mut boat_ui.cols, 1..=8).text("Colonnes"));
+                                }
+
+                                if ui.button("Appliquer configuration bateau").clicked() {
+                                    apply_boat = true;
+                                }
+                            });
+
+                            ui.separator();
+                            ui.label("Traînée / Couple par objet détecté");
+                            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                let mut ids: Vec<usize> = history.per_object.keys().cloned().collect();
+                                ids.sort();
+                                for id in ids {
+                                    if let Some(h) = history.per_object.get(&id) {
+                                        ui.label(format!("Objet #{id}"));
+                                        egui_plot::Plot::new(("drag_plot", id))
+                                            .height(90.0)
+                                            .show(ui, |plot_ui| {
+                                                plot_ui.line(
+                                                    egui_plot::Line::new(egui_plot::PlotPoints::from(h.drag.clone()))
+                                                        .name("Traînée"),
+                                                );
+                                            });
+                                        egui_plot::Plot::new(("torque_plot", id))
+                                            .height(90.0)
+                                            .show(ui, |plot_ui| {
+                                                plot_ui.line(
+                                                    egui_plot::Line::new(egui_plot::PlotPoints::from(h.torque.clone()))
+                                                        .name("Couple"),
+                                                );
+                                            });
+                                        ui.separator();
+                                    }
+                                }
+                            });
                         });
                     });
 
+                    // --- 2. Application de la configuration bateau, si demandée ---
+                    if apply_boat {
+                        let kind = match boat_ui.kind_index {
+                            0 => ContainerLayoutKind::Grid { rows: boat_ui.rows, cols: boat_ui.cols },
+                            1 => ContainerLayoutKind::Pyramid { rows: boat_ui.rows },
+                            _ => ContainerLayoutKind::Staggered { rows: boat_ui.rows, cols: boat_ui.cols },
+                        };
+                        let boat_params = BoatParams {
+                            center: (N as isize / 2, N as isize / 2),
+                            hull_width: boat_ui.hull_width,
+                            hull_height: boat_ui.hull_height,
+                            container_width: boat_ui.container_width,
+                            container_height: boat_ui.container_height,
+                            container_gap: boat_ui.container_gap,
+                            kind,
+                            flow_angle: 0.0,
+                        };
+                        let layout = build_boat_layout("custom", &boat_params);
+                        grid = Grid::new();
+                        grid.apply_layout(&layout);
+                        history.clear();
+                        step = 0;
+                    }
+
+                    // --- 3. Pas de simulation (normal ou manuel via "Step") ---
+                    if !params.paused || do_step {
+                        grid.initialize_wind_tunnel(params.flow_density, params.flow_velocity, &hole_pos);
+                        grid.vel2_step(params.flow_velocity);
+                        step += 1;
+
+                        let objects = grid.compute_object_forces();
+                        history.push(&objects);
+                    }
+
+                    // --- 4. Rendu grille dans le buffer pixels ---
+                    draw_grid(&grid, pixels.frame_mut(), grid_w, params.paint_vorticity);
+
+                    // --- 5. Finalisation UI ---
                     egui_winit.handle_platform_output(&window, full_output.platform_output);
                     let clipped_primitives = egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
 
-                    // --- 4. Rendu combiné pixels + egui ---
+                    // --- 6. Rendu combiné pixels + egui ---
                     let render_result = pixels.render_with(|encoder, render_target, context| {
                         context.scaling_renderer.render(encoder, render_target);
 
@@ -290,7 +490,7 @@ fn save_screenshot(frame: &[u8], w: usize, h: usize, step: usize) {
     }
 }
 
-/// Reprend bresenham_line de visualization.rs (dessin de murs entre deux points de la souris)
+/// Bresenham : renvoie les points d'une ligne entre deux positions de grille.
 fn bresenham_line(x0: usize, y0: usize, x1: usize, y1: usize) -> Vec<(usize, usize)> {
     let mut points = Vec::new();
     let dx = (x1 as isize - x0 as isize).abs();
