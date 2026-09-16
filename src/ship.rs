@@ -6,8 +6,8 @@ use std::collections::HashMap;
 Module de test pour l'organisation des conteneurs sur le bateau.
 
 Idée générale :
-    - `wall: bool` (dans Cell) reste la seule chose que le solveur fluide connaît.
-    - On garde EN PLUS une table cell_idx -> WallKind pour savoir, après coup,
+    - `wall : bool` (dans Cell) reste la seule chose que le solveur fluide connaît.
+    - On garde EN PLUS une table cell_idx → WallKind pour savoir, après coup,
       quelle cellule murale appartenait à la coque ou à quel conteneur.
     - compute_wall_forces() (déjà existant, pressure_computation.rs) donne la force
       PAR CELLULE, avant l'agrégation par objet connexe. On s'en sert directement
@@ -107,7 +107,7 @@ impl Grid {
 /// NB IMPORTANT sur le couple : compute_object_forces() calcule un couple par
 /// OBJET CONNEXE (via identify_objects/DFS), pas par étiquette. Si un conteneur
 /// touche la coque, ils forment un seul objet et le couple sera celui du bloc
-/// entier, pas celui du conteneur isolé. Pour un couple isolé par conteneur il
+/// entier, pas celui du conteneur isolé. Pour un couple isolé par conteneur, il
 /// faudrait réimplémenter le calcul de couple ici à partir de compute_wall_forces()
 /// + labels (même logique que compute_object_forces mais filtrée par WallKind).
 /// Je laisse cette version simple (couple global de l'ensemble coque+conteneurs)
@@ -218,7 +218,7 @@ pub struct BoatParams {
 }
 
 /// Construit une ShipLayout (coque rectangulaire + conteneurs empilés dessus)
-/// à partir de `BoatParams`. Les conteneurs sont empilés "vers le haut" (y
+/// à partir de `BoatParams'. Les conteneurs sont empilés "vers le haut" (y
 /// décroissant) à partir du sommet de la coque.
 pub fn build_boat_layout(name: &str, p: &BoatParams) -> ShipLayout {
     let hull_rects = vec![(p.center, p.hull_width, p.hull_height)];

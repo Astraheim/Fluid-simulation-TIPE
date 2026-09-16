@@ -44,8 +44,6 @@ fn main() {
     } else if GRID == "2" {
 
         let mut grid2 = Grid2::new(N as usize, N as usize, DX);
-        
-        //let gravity = Vector22::new(0.0, -0.5); // Gravité vers le bas
 
         //grid2.add_circle_obstacle(N/2.0, N/2.0, N/8.0, None);
         //grid2.add_circle_obstacle(300.0, 300.0, 50.5, None);

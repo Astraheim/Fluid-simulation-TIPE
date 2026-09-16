@@ -1,8 +1,6 @@
 use crate::conditions::*;
 use crate::grid::*;
 use crate::grid2::*;
-use minifb::{Window, WindowOptions};
-use std::time::Instant;
 use crate::grid2::*;
 
 /*

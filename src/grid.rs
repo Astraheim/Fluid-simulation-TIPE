@@ -143,7 +143,7 @@ impl Vector2 {
     }
 
     /// Exactly the same as magnitude, return vector magnitude
-        pub fn length(&self) -> f32 {
+    pub fn length(&self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
 
@@ -246,19 +246,19 @@ impl Grid {
                     }
                 }
             }
-        for j in 0..=(N + 1.0) as usize {
-            for &i in &[0, (N + 1.0) as usize] {
-                if let Some(idx) = grid.try_index(i, j) {
-                    grid.cells[idx].wall = true;
+            for j in 0..=(N + 1.0) as usize {
+                for &i in &[0, (N + 1.0) as usize] {
+                    if let Some(idx) = grid.try_index(i, j) {
+                        grid.cells[idx].wall = true;
+                    }
                 }
             }
         }
+        grid
     }
-    grid
-}
 
 
-/// Adds a source to the pressure of the cells
+    /// Adds a source to the pressure of the cells
     pub fn add_source(&mut self, source: &[f32], dt: f32) {
         self.cells.par_iter_mut().enumerate().for_each(|(i, cell)| {
             cell.pressure += dt * source[i];
@@ -312,44 +312,41 @@ impl Grid {
     }
 
     /// Advect the velocity of the cells in the grid
-    // Modification de advect_velocity pour une staggered grid
+    // Modification de advect_velocity pour une staggered grid — PARALLÉLISÉE :
+    // chaque new_u[idx]/new_v[idx] ne dépend que de l'état figé de self (comme
+    // pour advect_density), donc on calcule les deux champs avec rayon plutôt
+    // qu'avec une double boucle séquentielle.
     pub fn advect_velocity(&mut self, dt: f32) {
         let dt0 = dt * N;
-        let mut new_u = vec![0.0; self.cells.len()];
-        let mut new_v = vec![0.0; self.cells.len()];
+        let n = N as usize;
 
-        // Advection de la vitesse horizontale u
-        for i in 1..=(N as usize) {
-            for j in 1..=(N as usize) {
+        let u_updates: Vec<(usize, f32)> = (0..n * n)
+            .into_par_iter()
+            .map(|k| {
+                let i = k / n + 1;
+                let j = k % n + 1;
                 let idx = self.to_index(i, j);
+
                 if self.cells[idx].wall {
-                    new_u[idx] = 0.0;
-                    continue;
+                    return (idx, 0.0);
                 }
 
                 // Position de u(i,j) sur la grille
                 let pos_x = i as f32; // face entre (i-1,j) et (i,j)
                 let pos_y = j as f32 + 0.5; // centré verticalement
 
-                // Calculer la vitesse interpolée au point (pos_x, pos_y)
                 let u_center = self.get_u(i, j);
 
-                // Déterminer les vitesses moyennes aux centres des cellules adjacentes
-                let v_nw = self.get_v(i-1, j);
+                let v_nw = self.get_v(i - 1, j);
                 let v_ne = self.get_v(i, j);
-                let v_sw = self.get_v(i-1, j+1);
-                let v_se = self.get_v(i, j+1);
+                let v_sw = self.get_v(i - 1, j + 1);
+                let v_se = self.get_v(i, j + 1);
                 let v_center = 0.25 * (v_nw + v_ne + v_sw + v_se);
 
-                // Backtracking
-                let x = pos_x - dt0 * u_center;
-                let y = pos_y - dt0 * v_center;
+                // Backtracking + clamp aux frontières
+                let x = (pos_x - dt0 * u_center).clamp(0.5, N + 0.5);
+                let y = (pos_y - dt0 * v_center).clamp(0.5, N + 0.5);
 
-                // Limiter aux frontières
-                let x = x.clamp(0.5, N + 0.5);
-                let y = y.clamp(0.5, N + 0.5);
-
-                // Interpolation bilinéaire
                 let i0 = x.floor() as usize;
                 let i1 = i0 + 1;
                 let j0 = y.floor() as usize;
@@ -360,53 +357,48 @@ impl Grid {
                 let t1 = y - j0 as f32;
                 let t0 = 1.0 - t1;
 
-                // Interpoler la vitesse u
                 let sample_u = |i: usize, j: usize| -> f32 {
-                    if let Some(idx) = self.try_index(i, j) {
-                        if self.cells[idx].wall {
+                    if let Some(sidx) = self.try_index(i, j) {
+                        if self.cells[sidx].wall {
                             return 0.0;
                         }
                     }
                     self.get_u(i, j)
                 };
 
-                new_u[idx] = s0 * (t0 * sample_u(i0, j0) + t1 * sample_u(i0, j1)) +
-                    s1 * (t0 * sample_u(i1, j0) + t1 * sample_u(i1, j1));
-            }
-        }
+                let value = s0 * (t0 * sample_u(i0, j0) + t1 * sample_u(i0, j1))
+                    + s1 * (t0 * sample_u(i1, j0) + t1 * sample_u(i1, j1));
 
-        // Advection de la vitesse verticale v
-        for i in 1..=(N as usize) {
-            for j in 1..=(N as usize) {
+                (idx, value)
+            })
+            .collect();
+
+        let v_updates: Vec<(usize, f32)> = (0..n * n)
+            .into_par_iter()
+            .map(|k| {
+                let i = k / n + 1;
+                let j = k % n + 1;
                 let idx = self.to_index(i, j);
+
                 if self.cells[idx].wall {
-                    new_v[idx] = 0.0;
-                    continue;
+                    return (idx, 0.0);
                 }
 
                 // Position de v(i,j) sur la grille
                 let pos_x = i as f32 + 0.5; // centré horizontalement
                 let pos_y = j as f32; // face entre (i,j-1) et (i,j)
 
-                // Calculer la vitesse interpolée au point (pos_x, pos_y)
                 let v_center = self.get_v(i, j);
 
-                // Déterminer les vitesses moyennes aux centres des cellules adjacentes
-                let u_nw = self.get_u(i, j-1);
-                let u_ne = self.get_u(i+1, j-1);
+                let u_nw = self.get_u(i, j - 1);
+                let u_ne = self.get_u(i + 1, j - 1);
                 let u_sw = self.get_u(i, j);
-                let u_se = self.get_u(i+1, j);
+                let u_se = self.get_u(i + 1, j);
                 let u_center = 0.25 * (u_nw + u_ne + u_sw + u_se);
 
-                // Backtracking
-                let x = pos_x - dt0 * u_center;
-                let y = pos_y - dt0 * v_center;
+                let x = (pos_x - dt0 * u_center).clamp(0.5, N + 0.5);
+                let y = (pos_y - dt0 * v_center).clamp(0.5, N + 0.5);
 
-                // Limiter aux frontières
-                let x = x.clamp(0.5, N + 0.5);
-                let y = y.clamp(0.5, N + 0.5);
-
-                // Interpolation bilinéaire
                 let i0 = x.floor() as usize;
                 let i1 = i0 + 1;
                 let j0 = y.floor() as usize;
@@ -417,23 +409,27 @@ impl Grid {
                 let t1 = y - j0 as f32;
                 let t0 = 1.0 - t1;
 
-                // Interpoler la vitesse v
                 let sample_v = |i: usize, j: usize| -> f32 {
-                    if let Some(idx) = self.try_index(i, j) {
-                        if self.cells[idx].wall { return 0.0; }
+                    if let Some(sidx) = self.try_index(i, j) {
+                        if self.cells[sidx].wall { return 0.0; }
                     }
                     self.get_v(i, j)
                 };
 
-                new_v[idx] = s0 * (t0 * sample_v(i0, j0) + t1 * sample_v(i0, j1)) +
-                    s1 * (t0 * sample_v(i1, j0) + t1 * sample_v(i1, j1));
-            }
-        }
+                let value = s0 * (t0 * sample_v(i0, j0) + t1 * sample_v(i0, j1))
+                    + s1 * (t0 * sample_v(i1, j0) + t1 * sample_v(i1, j1));
 
-        // Mettre à jour les vitesses
-        for idx in 0..self.cells.len() {
-            self.cells[idx].velocity_x = new_u[idx];
-            self.cells[idx].velocity_y = new_v[idx];
+                (idx, value)
+            })
+            .collect();
+
+        // Mettre à jour les vitesses (partie séquentielle, mais O(n²) simple
+        // écriture, négligeable comparé au calcul ci-dessus)
+        for (idx, value) in u_updates {
+            self.cells[idx].velocity_x = value;
+        }
+        for (idx, value) in v_updates {
+            self.cells[idx].velocity_y = value;
         }
     }
 
@@ -599,7 +595,7 @@ impl Grid {
         }
         count
     }
-    
+
 
     /// Project the velocity field to ensure incompressibility
     // Modification of project to work with staggered grid and walls
@@ -696,7 +692,7 @@ impl Grid {
                 }
 
                 // Ne pas aller au-delà de la dernière cellule verticale
-                    let idx = self.to_index(i, j);
+                let idx = self.to_index(i, j);
                 if !self.cells[idx].wall {
                     // Corriger v(i,j) (vitesse verticale à la face du bas de la cellule)
                     let p_bottom = if j > 1 {
@@ -712,65 +708,6 @@ impl Grid {
             }
         }
     }
-
-
-    /// Project the velocity field to ensure incompressibility (alternative method)
-    /*pub fn project2(&mut self, num_iters: usize, dt: f32, over_relaxation: f32) {
-        let cp = 1.0 * (1.0 / N as f32) / dt; // densité * h / dt, ici densité = 1
-        let h = 1.0 / N as f32;
-
-        for _ in 0..num_iters {
-            let mut updates = Vec::new();
-
-            for (i, j, idx) in self.iter_morton() {
-                if !self.in_bounds(i, j) || self.cells[idx].wall {
-                    continue;
-                }
-
-                let sx0 = if self.in_bounds(i - 1, j) && !self.cells[self.to_index(i - 1, j)].wall { 1.0 } else { 0.0 };
-                let sx1 = if self.in_bounds(i + 1, j) && !self.cells[self.to_index(i + 1, j)].wall { 1.0 } else { 0.0 };
-                let sy0 = if self.in_bounds(i, j - 1) && !self.cells[self.to_index(i, j - 1)].wall { 1.0 } else { 0.0 };
-                let sy1 = if self.in_bounds(i, j + 1) && !self.cells[self.to_index(i, j + 1)].wall { 1.0 } else { 0.0 };
-
-                let s = sx0 + sx1 + sy0 + sy1;
-                if s == 0.0 {
-                    continue;
-                }
-
-                let u_r = self.cells[self.to_index(i + 1, j)].velocity.x;
-                let u_l = self.cells[self.to_index(i, j)].velocity.x;
-                let v_t = self.cells[self.to_index(i, j + 1)].velocity.y;
-                let v_b = self.cells[self.to_index(i, j)].velocity.y;
-
-                let div = u_r - u_l + v_t - v_b;
-
-                let mut p = -div / s;
-                p *= over_relaxation;
-                let dp = cp * p;
-
-                updates.push((i, j, idx, dp, sx0, sx1, sy0, sy1));
-            }
-
-            // Updates
-            for (i, j, idx, dp, sx0, sx1, sy0, sy1) in &updates {
-                self.cells[*idx].pressure += *dp;
-
-                if *sx0 != 0.0 {
-                    self.cells[self.to_index(i - 1, *j)].velocity.x -= sx0 * *dp;
-                }
-                if *sx1 != 0.0 {
-                    self.cells[self.to_index(i + 1, *j)].velocity.x += sx1 * *dp;
-                }
-                if *sy0 != 0.0 {
-                    self.cells[self.to_index(*i, j - 1)].velocity.y -= sy0 * *dp;
-                }
-                if *sy1 != 0.0 {
-                    self.cells[self.to_index(*i, j + 1)].velocity.y += sy1 * *dp;
-                }
-            }
-        }
-    }*/
-
 
 
     /// Impose u=0, v=0 in obstacles and walls, constant inflow on the left, outflow (∂/∂x=0) on the right and on the top/bottom
@@ -903,23 +840,23 @@ impl Grid {
         }
     }
 
-        /// Initialize the wall character of a cell
-        pub fn wall_init(&mut self, line: usize, column: usize, wall: bool) {
-            if line <= (N + 1.0) as usize && column <= (N + 1.0) as usize {
-                let idx = self.to_index(column, line);
-                if !self.cells[idx].wall {
-                    self.cells[idx].wall = wall;
-                    if wall {
-                        // Un mur vient d'être posé : le cache objets/forces est périmé.
-                        self.wall_topology_dirty = true;
-                    }
-                } else {
-                    println!("Impossible to modify a wall!");
+    /// Initialize the wall character of a cell
+    pub fn wall_init(&mut self, line: usize, column: usize, wall: bool) {
+        if line <= (N + 1.0) as usize && column <= (N + 1.0) as usize {
+            let idx = self.to_index(column, line);
+            if !self.cells[idx].wall {
+                self.cells[idx].wall = wall;
+                if wall {
+                    // Un mur vient d'être posé : le cache objets/forces est périmé.
+                    self.wall_topology_dirty = true;
                 }
             } else {
-                println!("Error: indices out of bounds!");
+                println!("Impossible to modify a wall!");
             }
+        } else {
+            println!("Error: indices out of bounds!");
         }
+    }
 
     /// Initialize the velocity of a cell
     pub fn velocity_init(&mut self, line: usize, column: usize, vx: f32, vy: f32) {
@@ -1078,13 +1015,18 @@ impl Grid {
     }
 
 
-    /// Create a wind tunnel like setup to test as in wind tunnel experiments
-    pub fn initialize_wind_tunnel(&mut self, density: f32, flow_velocity: f32, hole_positions: &[usize]) {
+    /// Pose une bonne fois pour toutes les murs du tunnel de vent (coffre
+    /// gauche plein, coffre droit percé aux positions données). À appeler
+    /// UNE SEULE FOIS au setup (ou après un Grid::new()/apply_layout qui a
+    /// remis la grille à zéro) : la géométrie ne change jamais ensuite, donc
+    /// inutile de rescanner 1..=N à chaque frame pour la reposer.
+    /// Le `if !cells[idx].wall` garde la fonction idempotente si jamais elle
+    /// est rappelée par erreur (pas de spam "Impossible to modify a wall!").
+    pub fn setup_wind_tunnel_walls(&mut self, hole_positions: &[usize]) {
         let left_wall = 1;
         let box_width = (N as usize / 30).max(2); // Width of the box
         let right_wall = left_wall + box_width;
 
-        // Create the walls
         for j in 1..=N as usize {
             let idx_left = self.to_index(left_wall, j);
             if !self.cells[idx_left].wall {
@@ -1098,8 +1040,16 @@ impl Grid {
                 }
             }
         }
+    }
 
-        // Add density in the box
+    /// Injecte densité/vitesse dans le coffre du tunnel de vent. Contrairement
+    /// aux murs (géométrie fixe, voir `setup_wind_tunnel_walls`), l'injection
+    /// DOIT être répétée à chaque frame pour maintenir le flux entrant.
+    pub fn inject_wind_tunnel_flow(&mut self, density: f32, flow_velocity: f32) {
+        let left_wall = 1;
+        let box_width = (N as usize / 30).max(2);
+        let right_wall = left_wall + box_width;
+
         for i in (left_wall + 2)..=right_wall - 5 {
             for j in 2..=N as usize - 1 {
                 let idx = self.to_index(i, j);
@@ -1108,6 +1058,16 @@ impl Grid {
                 }
             }
         }
+    }
+
+    /// Create a wind tunnel like setup to test as in wind tunnel experiments.
+    /// Conservé pour compatibilité (scripts headless, anciens appels) : fait
+    /// les murs ET l'injection en un seul appel. Dans une boucle interactive,
+    /// préférer `setup_wind_tunnel_walls()` une fois au setup, puis
+    /// `inject_wind_tunnel_flow()` à chaque frame — voir app.rs.
+    pub fn initialize_wind_tunnel(&mut self, density: f32, flow_velocity: f32, hole_positions: &[usize]) {
+        self.setup_wind_tunnel_walls(hole_positions);
+        self.inject_wind_tunnel_flow(density, flow_velocity);
     }
 
 
@@ -1205,9 +1165,3 @@ impl Grid {
 
 
 }
-
-
-
-
-
-

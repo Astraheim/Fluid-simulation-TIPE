@@ -157,10 +157,10 @@ impl Grid {
     /// Recalcule la connectivité des murs (ids d'objets) et la liste des
     /// cellules murales, mais seulement si la topologie a réellement changé
     /// depuis le dernier appel (voir `wall_init` dans grid.rs, qui bascule
-    /// le drapeau `wall_topology_dirty`). Transforme
+    /// le drapeau `wall_topology_dirty'). Transforme
     /// identify_objects/compute_wall_forces/compute_object_forces d'un
     /// "scan complet de la grille à chaque frame" en "scan complet
-    /// seulement quand un mur est réellement ajouté".
+    /// uniquement quand un mur est réellement ajouté".
     fn refresh_wall_topology_cache(&mut self) {
         if !self.wall_topology_dirty {
             return;

@@ -9,27 +9,41 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::event::{Event, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{EventLoop};
 use winit::window::WindowBuilder;
 
 /*
 Remplace run_simulation() de visualization.rs.
 
-Architecture :
-    - winit : fenêtre + boucle d'événements
-    - pixels : buffer de pixels GPU-accéléré
-    - egui + egui-wgpu : UI immédiate par-dessus la texture pixels
-
 Nouveautés (session du jour) :
-    - Affichage vorticité (bouton, réutilise le calcul de visualization.rs)
-    - Stylo réglable (taille) + mode "ligne droite" pour dessiner les murs
-    - Bouton "Step" pour avancer d'un seul pas quand la simulation est en pause
-    - Un graphe traînée + un graphe couple PAR objet détecté (au lieu d'un
-      graphe global agrégé)
+    - Vorticité affichée en gradient (bleu -> blanc -> rouge), plus deux
+      nouveaux champs affichables en gradient : pression et vitesse (norme).
+      Sélection via boutons radio "Champ affiché".
+    - Temps de calcul d'un tick en ms affiché en direct + petit graphique
+      d'évolution, et FPS de calcul déduit (1000 / ms_par_tick).
+    - Fenêtre redimensionnable / passable en plein écran sans crash
+      (WindowEvent::Resized -> pixels.resize_surface, avec garde sur taille
+      nulle quand la fenêtre est minimisée).
+    - Bouton "Quitter (stop propre)" qui appelle elwt.exit() proprement.
+    - Filtrage des graphes traînée/couple par objet : un curseur "taille
+      mini (cellules)" et un curseur "colonne mini (x)" permettent de ne pas
+      tracer les dizaines de petits murs (ex: le tunnel de vent).
+    - Stylo réglable (taille) + mode "ligne droite" pour dessiner les murs.
+    - Bouton "Step" pour avancer d'un seul pas quand la simulation est en pause.
+    - Un graphe traînée + un graphe couple PAR objet détecté.
     - Panneau "Générateur de bateau" : construit une ShipLayout (coque +
       conteneurs) suivant plusieurs organisations, pour tester vite (voir
-      ship.rs::build_boat_layout / ContainerLayoutKind)
+      ship.rs::build_boat_layout / ContainerLayoutKind).
 */
+
+/// Champ affiché dans la grille.
+#[derive(Clone, Copy, PartialEq)]
+enum DisplayMode {
+    Density,
+    Vorticity,
+    Pressure,
+    Velocity,
+}
 
 /// Paramètres modifiables sans recréer la grille.
 pub struct SimParams {
@@ -39,9 +53,13 @@ pub struct SimParams {
     pub w_drag: f32,
     pub w_torque: f32,
     pub paused: bool,
-    pub paint_vorticity: bool,
     pub pen_size: usize,
     pub straight_line_mode: bool,
+    display_mode: DisplayMode,
+    /// Seuil en dessous duquel un objet (nombre de cellules) n'est pas tracé.
+    pub min_cells_to_plot: usize,
+    /// Colonne (x) en dessous de laquelle un objet n'est pas tracé.
+    pub min_column_x: f32,
 }
 
 impl Default for SimParams {
@@ -53,17 +71,22 @@ impl Default for SimParams {
             w_drag: 1.0,
             w_torque: 1.0,
             paused: false,
-            paint_vorticity: false,
             pen_size: 1,
             straight_line_mode: false,
+            display_mode: DisplayMode::Density,
+            min_cells_to_plot: 20,
+            min_column_x: 0.0,
         }
     }
 }
 
-/// Historique glissant traînée/couple pour UN objet détecté.
+/// Historique glissant traînée/couple pour UN objet détecté, avec les
+/// dernières métadonnées connues (taille, position) utilisées pour le filtrage.
 pub struct ObjectHistory {
     pub drag: Vec<[f64; 2]>,
     pub torque: Vec<[f64; 2]>,
+    pub last_cell_count: usize,
+    pub last_center_x: f32,
 }
 
 /// Historiques séparés par id d'objet (au lieu d'un seul historique agrégé).
@@ -83,9 +106,13 @@ impl ForceHistories {
             let entry = self.per_object.entry(obj.id).or_insert_with(|| ObjectHistory {
                 drag: Vec::new(),
                 torque: Vec::new(),
+                last_cell_count: 0,
+                last_center_x: 0.0,
             });
             entry.drag.push([self.step as f64, obj.total_force.x as f64]);
             entry.torque.push([self.step as f64, obj.torque as f64]);
+            entry.last_cell_count = obj.cell_count;
+            entry.last_center_x = obj.center_of_mass.x;
             if entry.drag.len() > self.max_points {
                 entry.drag.remove(0);
                 entry.torque.remove(0);
@@ -97,6 +124,27 @@ impl ForceHistories {
     fn clear(&mut self) {
         self.per_object.clear();
         self.step = 0;
+    }
+}
+
+/// Historique glissant du temps de calcul d'un tick (ms).
+struct TickHistory {
+    points: Vec<[f64; 2]>,
+    max_points: usize,
+    step: usize,
+}
+
+impl TickHistory {
+    fn new(max_points: usize) -> Self {
+        Self { points: Vec::new(), max_points, step: 0 }
+    }
+
+    fn push(&mut self, ms: f64) {
+        self.points.push([self.step as f64, ms]);
+        if self.points.len() > self.max_points {
+            self.points.remove(0);
+        }
+        self.step += 1;
     }
 }
 
@@ -139,6 +187,43 @@ fn density_color(density: f32) -> [u8; 4] {
     }
 }
 
+/// Colormap divergente bleu -> blanc -> rouge, pour des champs pouvant être
+/// négatifs ou positifs (vorticité, pression). t attendu dans [-1, 1].
+fn diverging_colormap(t: f32) -> [u8; 4] {
+    let t = t.clamp(-1.0, 1.0);
+    let (r, g, b) = if t < 0.0 {
+        let s = 1.0 + t; // 0 à t=-1 -> 1 à t=0
+        (s, s, 1.0)
+    } else {
+        let s = 1.0 - t; // 1 à t=0 -> 0 à t=1
+        (1.0, s, s)
+    };
+    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]
+}
+
+/// Colormap séquentielle (type "viridis" simplifiée), pour des champs
+/// toujours positifs (norme de vitesse). t attendu dans [0, 1].
+fn sequential_colormap(t: f32) -> [u8; 4] {
+    let t = t.clamp(0.0, 1.0);
+    const STOPS: [(f32, f32, f32); 5] = [
+        (0.05, 0.03, 0.30),
+        (0.00, 0.35, 0.55),
+        (0.00, 0.65, 0.35),
+        (0.75, 0.85, 0.10),
+        (0.99, 0.90, 0.15),
+    ];
+    let n = STOPS.len() - 1;
+    let scaled = t * n as f32;
+    let idx = (scaled.floor() as usize).min(n - 1);
+    let frac = scaled - idx as f32;
+    let (r0, g0, b0) = STOPS[idx];
+    let (r1, g1, b1) = STOPS[idx + 1];
+    let r = r0 + (r1 - r0) * frac;
+    let g = g0 + (g1 - g0) * frac;
+    let b = b0 + (b1 - b0) * frac;
+    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255]
+}
+
 /// Vorticity locale (reprise de visualization.rs, adaptée pour l'app egui/pixels)
 fn vorticity_at(grid: &Grid, i: usize, j: usize) -> f32 {
     let dx = DX;
@@ -160,29 +245,56 @@ fn vorticity_at(grid: &Grid, i: usize, j: usize) -> f32 {
     dv_dx - du_dy
 }
 
-/// Couleur associée à une valeur de vorticité (bleu = positif, rouge = négatif)
-fn vorticity_color(vort: f32) -> [u8; 4] {
-    let iv = ((vort.abs().min(5.0)) * 51.0) as u8;
-    if vort > 0.0 {
-        [0, iv, 0xFF, 0xFF]
-    } else {
-        [0xFF, iv, 0, 0xFF]
-    }
-}
-
-/// Rendu de la grille dans le buffer pixels, à résolution N x N.
-fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, paint_vorticity: bool) {
+/// Rendu de la grille dans le buffer pixels, à résolution N x N, selon le
+/// champ sélectionné. Pour les champs calculés (vorticité, pression,
+/// vitesse), un premier passage calcule l'échelle courante (autoscale) afin
+/// que le gradient reste lisible quelle que soit l'intensité du champ.
+fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode) {
     let n_max = N as usize + 1;
+
+    let mut max_abs: f32 = 1e-6;
+    if mode != DisplayMode::Density {
+        for j in 1..n_max {
+            for i in 1..n_max {
+                let idx = grid.to_index(i, j);
+                if grid.cells[idx].wall {
+                    continue;
+                }
+                let v = match mode {
+                    DisplayMode::Vorticity => vorticity_at(grid, i, j).abs(),
+                    DisplayMode::Pressure => grid.cells[idx].pressure.abs(),
+                    DisplayMode::Velocity => {
+                        let vx = grid.cells[idx].velocity_x;
+                        let vy = grid.cells[idx].velocity_y;
+                        (vx * vx + vy * vy).sqrt()
+                    }
+                    DisplayMode::Density => 0.0,
+                };
+                if v > max_abs {
+                    max_abs = v;
+                }
+            }
+        }
+    }
+
     for j in 1..n_max {
         for i in 1..n_max {
             let idx = grid.to_index(i, j);
             let px = (j * grid_w + i) * 4;
             let color = if grid.cells[idx].wall {
                 [0, 0, 0, 255]
-            } else if paint_vorticity {
-                vorticity_color(vorticity_at(grid, i, j))
             } else {
-                density_color(grid.cells[idx].density)
+                match mode {
+                    DisplayMode::Density => density_color(grid.cells[idx].density),
+                    DisplayMode::Vorticity => diverging_colormap(vorticity_at(grid, i, j) / max_abs),
+                    DisplayMode::Pressure => diverging_colormap(grid.cells[idx].pressure / max_abs),
+                    DisplayMode::Velocity => {
+                        let vx = grid.cells[idx].velocity_x;
+                        let vy = grid.cells[idx].velocity_y;
+                        let speed = (vx * vx + vy * vy).sqrt();
+                        sequential_colormap(speed / max_abs)
+                    }
+                }
             };
             frame[px..px + 4].copy_from_slice(&color);
         }
@@ -214,6 +326,7 @@ pub fn run_app(mut grid: Grid) -> ! {
     let window = WindowBuilder::new()
         .with_title("Simulation - pixels + egui")
         .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64))
+        .with_resizable(true)
         .build(&event_loop)
         .unwrap();
     let window = Arc::new(window);
@@ -232,6 +345,8 @@ pub fn run_app(mut grid: Grid) -> ! {
 
     let mut params = SimParams::default();
     let mut history = ForceHistories::new(300);
+    let mut tick_history = TickHistory::new(300);
+    let mut last_tick_ms: f64 = 0.0;
     let mut boat_ui = BoatUiState::default();
     let mut step: usize = 0;
     let start = Instant::now();
@@ -244,6 +359,12 @@ pub fn run_app(mut grid: Grid) -> ! {
 
     let hole_pos: Vec<usize> = (1..=N as usize).filter(|&x| x % FLOW_SPACE == 0).collect();
 
+    // Les murs du tunnel de vent ont une géométrie fixe : on les pose une
+    // seule fois ici (au lieu de les rescanner/reposer à chaque frame via
+    // initialize_wind_tunnel). Seule l'injection densité/vitesse doit être
+    // répétée à chaque frame, voir plus bas.
+    grid.setup_wind_tunnel_walls(&hole_pos);
+
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { event, .. } => {
@@ -252,6 +373,15 @@ pub fn run_app(mut grid: Grid) -> ! {
                     // egui a géré l'événement (clic sur un slider, etc.)
                 } else if let WindowEvent::CloseRequested = event {
                     elwt.exit();
+                } else if let WindowEvent::Resized(new_size) = event {
+                    // Fenêtre redimensionnée (plein écran compris) : on redimensionne
+                    // uniquement la SURFACE d'affichage, pas la résolution de la grille
+                    // (grid_w x grid_h) -> pas de recréation de buffer, pas de crash.
+                    if new_size.width > 0 && new_size.height > 0 {
+                        if let Err(e) = pixels.resize_surface(new_size.width, new_size.height) {
+                            eprintln!("Erreur redimensionnement surface: {e}");
+                        }
+                    }
                 } else if let WindowEvent::MouseInput { state, button, .. } = event {
                     if button == winit::event::MouseButton::Left {
                         let pressed = state == winit::event::ElementState::Pressed;
@@ -298,7 +428,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     }
                 } else if let WindowEvent::RedrawRequested = event {
                     // --- 1. UI egui (collectée avant le pas de simulation, pour
-                    //        que le bouton "Step" et "Appliquer bateau" agissent
+                    //        que "Step" / "Appliquer bateau" / "Quitter" agissent
                     //        dès cette frame) ---
                     let mut do_step = false;
                     let mut apply_boat = false;
@@ -315,7 +445,11 @@ pub fn run_app(mut grid: Grid) -> ! {
                             ui.add(egui::Slider::new(&mut params.w_torque, 0.0..=5.0).text("Poids couple"));
 
                             ui.separator();
-                            ui.checkbox(&mut params.paint_vorticity, "Afficher la vorticité");
+                            ui.label("Champ affiché");
+                            ui.radio_value(&mut params.display_mode, DisplayMode::Density, "Densité");
+                            ui.radio_value(&mut params.display_mode, DisplayMode::Vorticity, "Vorticité (gradient)");
+                            ui.radio_value(&mut params.display_mode, DisplayMode::Pressure, "Pression (gradient)");
+                            ui.radio_value(&mut params.display_mode, DisplayMode::Velocity, "Vitesse (gradient)");
 
                             ui.separator();
                             ui.label("Dessin de murs");
@@ -334,8 +468,20 @@ pub fn run_app(mut grid: Grid) -> ! {
                             if ui.button("Screenshot").clicked() {
                                 save_screenshot(pixels.frame(), grid_w, grid_h, step);
                             }
+                            if ui.button("Quitter (stop propre)").clicked() {
+                                elwt.exit();
+                            }
+
                             ui.separator();
+                            let fps = if last_tick_ms > 0.0 { 1000.0 / last_tick_ms } else { 0.0 };
                             ui.label(format!("Step: {step}  |  t: {:.1}s", start.elapsed().as_secs_f32()));
+                            ui.label(format!("Temps/tick: {:.2} ms  |  FPS (calcul): {:.1}", last_tick_ms, fps));
+                            egui_plot::Plot::new("tick_ms_plot").height(100.0).show(ui, |plot_ui| {
+                                plot_ui.line(
+                                    egui_plot::Line::new(egui_plot::PlotPoints::from(tick_history.points.clone()))
+                                        .name("ms/tick"),
+                                );
+                            });
 
                             ui.separator();
                             ui.collapsing("Générateur de bateau", |ui| {
@@ -369,12 +515,20 @@ pub fn run_app(mut grid: Grid) -> ! {
 
                             ui.separator();
                             ui.label("Traînée / Couple par objet détecté");
+                            ui.add(egui::Slider::new(&mut params.min_cells_to_plot, 0..=500).text("Taille mini (cellules)"));
+                            ui.add(egui::Slider::new(&mut params.min_column_x, 0.0..=N).text("Colonne mini (x)"));
                             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                                 let mut ids: Vec<usize> = history.per_object.keys().cloned().collect();
                                 ids.sort();
                                 for id in ids {
                                     if let Some(h) = history.per_object.get(&id) {
-                                        ui.label(format!("Objet #{id}"));
+                                        if h.last_cell_count < params.min_cells_to_plot {
+                                            continue;
+                                        }
+                                        if h.last_center_x < params.min_column_x {
+                                            continue;
+                                        }
+                                        ui.label(format!("Objet #{id} ({} cellules)", h.last_cell_count));
                                         egui_plot::Plot::new(("drag_plot", id))
                                             .height(90.0)
                                             .show(ui, |plot_ui| {
@@ -418,22 +572,35 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let layout = build_boat_layout("custom", &boat_params);
                         grid = Grid::new();
                         grid.apply_layout(&layout);
+                        // La grille vient d'être recréée : il faut reposer les
+                        // murs du tunnel de vent (géométrie fixe) une fois.
+                        grid.setup_wind_tunnel_walls(&hole_pos);
                         history.clear();
                         step = 0;
                     }
 
-                    // --- 3. Pas de simulation (normal ou manuel via "Step") ---
+                    // --- 3. Pas de simulation (normal ou manuel via "Step"), avec
+                    //        mesure du temps de calcul du tick ---
                     if !params.paused || do_step {
-                        grid.initialize_wind_tunnel(params.flow_density, params.flow_velocity, &hole_pos);
+                        let tick_start = Instant::now();
+
+                        // Murs déjà posés une fois (setup_wind_tunnel_walls) :
+                        // ici on ne fait plus que l'injection, répétée chaque
+                        // frame, sans rescanner/reposer les murs à chaque tick.
+                        grid.inject_wind_tunnel_flow(params.flow_density, params.flow_velocity);
                         grid.vel2_step(params.flow_velocity);
                         step += 1;
 
                         let objects = grid.compute_object_forces();
                         history.push(&objects);
+
+                        let ms = tick_start.elapsed().as_secs_f64() * 1000.0;
+                        last_tick_ms = ms;
+                        tick_history.push(ms);
                     }
 
                     // --- 4. Rendu grille dans le buffer pixels ---
-                    draw_grid(&grid, pixels.frame_mut(), grid_w, params.paint_vorticity);
+                    draw_grid(&grid, pixels.frame_mut(), grid_w, params.display_mode);
 
                     // --- 5. Finalisation UI ---
                     egui_winit.handle_platform_output(&window, full_output.platform_output);
