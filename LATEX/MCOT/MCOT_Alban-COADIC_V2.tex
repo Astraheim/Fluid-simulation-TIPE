@@ -1,0 +1,153 @@
+\documentclass{article}
+
+\usepackage[french]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{bookmark}
+\usepackage{geometry}
+\usepackage{tikz}
+\usetikzlibrary{positioning,chains,fit,shapes,calc}
+\usepackage[most]{tcolorbox}
+\usepackage[dvipsnames]{xcolor}
+\geometry{
+  a4paper,
+  left=25mm,
+  right=25mm,
+  top=8mm,
+  bottom=25mm}
+\usepackage{fancyhdr}
+
+% Suppression des alinéas automatiques
+\setlength{\parindent}{0pt}
+
+\begin{document}
+
+\textit{(n°candidat) COADIC Alban}
+
+\section*{Simulation d'écoulement de fluides sur des surfaces solides.}
+\vspace{5mm}
+
+
+L'écoulement d'un fluide autour d'un obstacle peut générer des structures
+tourbillonnantes appelées vortex de von Kármán. Ils sont à l'origine de structures
+périodiques de tourbillons alternés induisant des forces cycliques qui représentent un
+défi majeur pour l'intégrité des structures, pouvant engendrer des phénomènes de
+résonance destructeurs.
+
+\vspace{8mm}
+
+Bien que prévisibles en théorie, les vortex de von Kármán créent des instabilités de
+pression complexes derrière les obstacles. Leur maîtrise est cruciale pour l'optimisation
+de structures soumises à des vents violents ou des courants marins. La conception d'une
+modélisation en temps réel aiderait à la sécurisation des infrastructures
+
+
+
+\section*{Positionnement thématique (ÉTAPE 1) :}
+- \textit{PHYSIQUE} (Mécanique des fluides)\\
+- \textit{INFORMATIQUE} (Modélisation et simulation numérique (CFD))\\
+- \textit{PHYSIQUE} (Mécanique du solide)\\
+
+
+\section*{Mots-clés (ÉTAPE 1) :}
+\begin{tabular}{ll}
+\textbf{Mots-Clés (français)} & \textbf{Mots-Clés (anglais)} \\
+\textit{Vortex de Von Kármán} & \textit{Von Kármán vortex} \\
+\textit{Equations de Navier-Stokes} & \textit{Navier-Stokes equations} \\
+\textit{Simulation en temps réel} & \textit{Real-time simulation} \\
+\textit{Résistance structurelle} & \textit{Structural resistance} 
+\end{tabular}
+\vspace{5mm}  
+
+
+\section*{Bibliographie commentée}
+
+La mise en place d'une simulation numérique efficace nécessite une solide maîtrise des 
+fondements théoriques de la mécanique des fluides. Une formation universitaire spécialisée 
+fournit les clés pour intégrer ces modélisations dans le contexte général de la dynamique 
+des écoulements incompressibles et de la théorie de la couche limite [1]. Cette assise 
+théorique est essentielle pour analyser les résultats obtenus par le simulateur et pour 
+concevoir des géométries structurelles résistantes aux instabilités périodiques.\\
+
+La simulation des fluides autour d'obstacles repose sur une mise en œuvre algorithmique 
+efficace, particulièrement lorsqu'on vise une interaction en temps réel. Un article fondateur 
+dans ce domaine propose une approche privilégiant la stabilité visuelle et la rapidité de 
+calcul, permettant de simuler des écoulements complexes comme la fumée ou l'air de manière 
+interactive [2]. Ce travail se concentre sur une résolution simplifiée des équations de 
+Navier-Stokes [3], garantissant la conservation de la masse et de la quantité de mouvement.\\
+
+Toutefois, pour une application rigoureuse en ingénierie, cette rapidité doit être confrontée 
+à un choix. Il existe deux approches principales pour simuler un fluide. La méthode Eulérienne, qui 
+considère le fluide à travers un maillage fixe et la méthode Lagrangienne, qui suit des particules
+individuelles [4]. Le choix de la méthode influence directement la précision et la complexité
+de la simulation, et afin d'être capable d'observer les structures périodiques formées il est
+préférable d'opter pour une approche eulérienne[2].\\
+
+Une fois la méthode choisie, la mise en œuvre numérique nécessite de traiter chaque 
+composante de la grille indépendamment afin de satisfaire les équations de Navier-Stokes[3] à
+tout instant. Il faut alors implémenter une méthode itérative parcourant chaque cellule de la
+grille pour mettre à jour les valeurs de vitesse et de pression en fonction des conditions aux
+limites et des interactions fluide-structure[2].\\
+
+Par ailleurs, la conservation des grandeurs physiques, comme la masse ou le volume, reste un 
+défi majeur dans les simulations à temps de calcul réduit. L'étude d'un schéma semi-lagrangien 
+spécifique, le CIP-CSL, apporte une solution technique permettant de garantir une conservation 
+exacte tout en maintenant une interface nette autour de l'obstacle [5]. Cette rigueur 
+numérique est indispensable pour que les forces prédites par la simulation correspondent à la 
+réalité physique des vortex de von Kármán.\\
+
+Pour garantir la robustesse et la performance d'un tel outil, le choix du langage de 
+programmation est déterminant. Il faut être en mesure de paralléliser efficacement les calculs. 
+La documentation du langage Rust souligne comment la gestion stricte de la mémoire et la performance 
+brute de ce langage permettent de développer des outils de calcul intensif fiables [6]. L'utilisation 
+de Rust offre ainsi une alternative moderne aux langages classiques, assurant la stabilité du 
+simulateur lors de ces calculs parallélisés.\\
+
+  
+\section*{Problématique retenue}
+
+
+Comment est-il possible de modéliser et simuler en temps réel l'écoulement de fluides autour 
+d'obstacles solides   afin de prédire les forces exercées et d'optimiser la conception des structures pour minimiser
+les effets des vents et des vortex de von Kármán sur ces dernières ?\\
+
+
+
+\section*{Objectifs du TIPE du candidat}
+
+Simuler en temps réel l'écoulement de fluides autour d'obstacles solides.\\
+
+Prédire les forces exercées par les vents sur les structures.\\
+
+Visualiser les vortex de von Kármán générés par l'écoulement autour des obstacles.\\
+
+Analyser l'impact des vortex et des vents sur la résistance structurelle et proposer des solutions pour minimiser ces effets.\\
+
+
+
+
+
+\section*{Références bibliographiques (ÉTAPE 1)}
+
+\textbf{[1]} Buffat, M. Cours de mécanique des fluides approfondie, 2023. \url{https://perso.univ-lyon1.fr/marc.buffat/COURS/BOOK_MECAFLU_HTML/intro.html}\\
+
+\textbf{[2]} Stam, J. Real-Time Fluid Dynamics for Games, 2003. \textit{Proceedings of the Game Developer Conference}, 2003.\\
+
+\textbf{[3]} Couderc, F. Développement d'un code de calcul pour la simulation d'écoulements de fluides non miscibles. Thèse de doctorat, Université Paul Sabatier Toulouse III, 2007.\\
+
+\textbf{[4]} Resolved Analytics. Lagrangian vs Eulerian Phase Models, 2020. \url{https://www.resolvedanalytics.com/cfd-physics-models/lagrangian-vs-eulerian-phase-models}\\
+
+\textbf{[5]} Yabe, T., Tanaka, R., Nakamura, T., Xiao, E. An Exactly Conservative Semi-Lagrangian Scheme (CIP-CSL) in One Dimension. \textit{Journal of Computational Physics}, 169, (2001) 556--593.\\
+
+\textbf{[6]} Klabnik, S., Nichols, C. Le langage de programmation Rust, 2021. \url{https://jimskapt.github.io/rust-book-fr/title-page.html}\\
+
+
+
+
+
+
+\end{document}

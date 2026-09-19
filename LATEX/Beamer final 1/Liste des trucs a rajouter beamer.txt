@@ -1,0 +1,8 @@
+
+
+
+
+Méthoide de calcul des forces / 
+
+
+%% théorème de Helmholtz

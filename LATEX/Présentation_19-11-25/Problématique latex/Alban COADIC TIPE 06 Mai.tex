@@ -1,0 +1,123 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{framed}
+\usepackage{tcolorbox}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[T1]{fontenc}
+\usepackage{caption}
+\usepackage{babel}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{graphicx}
+\usepackage{color}
+\usepackage[dvipsnames]{xcolor} 
+\usepackage{media9}
+\usepackage{hyperref}
+
+
+
+
+\geometry{
+  a4paper,
+  left=25mm,
+  right=25mm,
+  top=25mm,
+  bottom=25mm}
+
+\hbadness=10000
+\pagestyle{fancy}
+\fancyhf{} 
+\fancyfoot[C]{\thepage}
+\fancyhead[L]{\textbf{MPI}} 
+\fancyhead[R]{2024$-$2025$-$2026} 
+\fancyhead[C]{\textbf{Alban COADIC}} 
+
+\begin{document}
+\begin{center}
+\huge \textbf{TIPE:\@ Présentation TIPE 19--11--25}
+\end{center}
+
+\vspace{5mm}
+
+\raggedright{\Large {\textcolor{OliveGreen}{\underline{\textbf{Sujet$ \ $:}}}}}\newline
+
+\large Code en Rust d'une simulation de mécanique des fluides en 2D afin
+de représenter les vortex de Von Karman.
+\vspace{3mm}\\
+
+\raggedright{\Large {\textcolor{OliveGreen}{\underline{\textbf{Objectif$ \ $:}}}}}
+\vspace{3mm}\\
+
+\large Comprendre les notions de base de la mécanique des fluides, les appliquer à un cas 
+concret et étudier les potentielles méthodes de protection des batiments et structures face
+aux vents (de manière plus générale face aux écoulements fluides).
+
+\vspace{3mm}
+\Large {\textcolor{OliveGreen}{\underline{ \textbf{Problématique$ \ $:}}}}
+\vspace{3mm}\\
+
+\large Comment modéliser les écoulements fluides autour d'un obstacle et étudier les
+effets de ces écoulements sur les structures environnantes?\newline
+
+
+\large 
+
+\Large {\textcolor{OliveGreen}{\underline{\textbf{Bibliographie$ \ $:}}}}\newline
+
+\large Cours de mécanique des fluides de l'université de Lyon$ \ $:
+
+\begin{tcolorbox}[colback=white, colframe=gray]
+  \normalsize\hypersetup{urlcolor=blue}
+  \href{https://perso.univ-lyon1.fr/marc.buffat/COURS/BOOK_MECAFLU_HTML/intro.html}{Cours de mécanique des fluides - Université Lyon 1}
+\end{tcolorbox}
+
+\vspace{2em}
+
+\large Thèse de BENSEDIRA Sidali de l'université de Blida$ \ $:
+
+\begin{tcolorbox}[colback=white, colframe=gray]
+  \normalsize\hypersetup{urlcolor=blue}
+  \href{https://di.univ-blida.dz/jspui/bitstream/123456789/9666/1/32-530-642-1.pdf}{Thèse - Université de Blida}
+\end{tcolorbox}
+
+\vspace{2em}
+
+\large Thèse de COUDERC Frédéric de l'université de Toulouse$ \ $:
+
+\begin{tcolorbox}[colback=white, colframe=gray]
+  \normalsize\hypersetup{urlcolor=blue}
+  \href{https://theses.hal.science/tel-00143709}{Thèse - Université de Toulouse}
+\end{tcolorbox}
+
+\vspace{2em}
+
+\begin{tcolorbox}[colback=lightgray!30, colframe=black]
+\begin{center}
+\hypersetup{pdfnewwindow=true}
+\href{Maths et Notions.pdf}{\Large \textcolor{RoyalBlue}{\textbf{Maths et notions}}}
+\end{center}
+\end{tcolorbox}
+\vspace{2mm}
+\begin{tcolorbox}[colback=lightgray!30, colframe=black]
+\begin{center}
+\hypersetup{pdfnewwindow=true}
+\href{Fancy_content_TIPE.pdf}{\Large \textcolor{RoyalBlue}{\textbf{Fancy content}}}
+\end{center}
+\end{tcolorbox}
+
+\vspace{2mm}
+\begin{tcolorbox}[colback=lightgray!30, colframe=black]
+\begin{center}
+\hypersetup{pdfnewwindow=true}
+\href{Explication_code.pdf}{\Large \textcolor{RoyalBlue}{\textbf{Explication du code}}}
+\end{center}
+\end{tcolorbox}
+
+
+
+\end{document} 

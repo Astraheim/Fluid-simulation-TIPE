@@ -14,26 +14,6 @@ use winit::window::WindowBuilder;
 
 /*
 Remplace run_simulation() de visualization.rs.
-
-Nouveautés (session du jour) :
-    - Vorticité affichée en gradient (bleu -> blanc -> rouge), plus deux
-      nouveaux champs affichables en gradient : pression et vitesse (norme).
-      Sélection via boutons radio "Champ affiché".
-    - Temps de calcul d'un tick en ms affiché en direct + petit graphique
-      d'évolution, et FPS de calcul déduit (1000 / ms_par_tick).
-    - Fenêtre redimensionnable / passable en plein écran sans crash
-      (WindowEvent::Resized -> pixels.resize_surface, avec garde sur taille
-      nulle quand la fenêtre est minimisée).
-    - Bouton "Quitter (stop propre)" qui appelle elwt.exit() proprement.
-    - Filtrage des graphes traînée/couple par objet : un curseur "taille
-      mini (cellules)" et un curseur "colonne mini (x)" permettent de ne pas
-      tracer les dizaines de petits murs (ex: le tunnel de vent).
-    - Stylo réglable (taille) + mode "ligne droite" pour dessiner les murs.
-    - Bouton "Step" pour avancer d'un seul pas quand la simulation est en pause.
-    - Un graphe traînée + un graphe couple PAR objet détecté.
-    - Panneau "Générateur de bateau" : construit une ShipLayout (coque +
-      conteneurs) suivant plusieurs organisations, pour tester vite (voir
-      ship.rs::build_boat_layout / ContainerLayoutKind).
 */
 
 /// Champ affiché dans la grille.
