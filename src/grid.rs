@@ -673,6 +673,20 @@ impl Grid {
             }
         }
 
+        // NOUVEAU : recopier le champ de pression résolu dans les cellules,
+        // afin qu'il soit exploitable ailleurs (visualisation, forces...).
+        // C'était l'oubli qui faisait que le mode d'affichage "Pression" ne
+        // montrait jamais rien: `pressure` restait purement local à cette
+        // fonction et n'était jamais renvoyé vers `self.cells[idx].pressure`.
+        for i in 1..=(N as usize) {
+            for j in 1..=(N as usize) {
+                let idx = self.to_index(i, j);
+                if !self.cells[idx].wall {
+                    self.cells[idx].pressure = pressure[idx];
+                }
+            }
+        }
+
         // Appliquer le gradient de pression pour corriger les vitesses
         for i in 1..=(N as usize + 1) {
             for j in 1..=(N as usize) {
