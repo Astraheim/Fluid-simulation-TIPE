@@ -834,11 +834,13 @@ pub fn run_app(mut grid: Grid) -> ! {
                         history.clear();
                         step = 0;
 
-                        // Comparaison headless de N configurations aléatoires
-                        // (dans l'esprit de l'étude jointe), imprimée en console.
+                        // Comparaison headless lancée en tâche de fond pour ne pas geler l'UI.
                         let n = boat_ui.random_batch_size;
-                        let variants = crate::ship::random_variants(base_params, n);
-                        crate::ship::compare_layouts(&variants, 300, &hole_pos);
+                        let hole_pos_bg = hole_pos.clone();
+                        std::thread::spawn(move || {
+                            let variants = crate::ship::random_variants(base_params, n);
+                            crate::ship::compare_layouts(&variants, 100, &hole_pos_bg);
+                        });
                     }
 
                     // --- 4. Pas de simulation (normal ou manuel via "Step"), avec
