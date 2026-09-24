@@ -733,37 +733,60 @@ impl Grid {
             }
         }
 
-        // Appliquer le gradient de pression pour corriger les vitesses
+        // Appliquer le gradient de pression pour corriger les vitesses, pondéré
+        // par l'inverse de la densité locale à chaque face en mode eau — sans
+        // cette pondération, un même gradient de pression déplace l'eau aussi
+        // facilement que l'air ("elle s'envole comme de la fumée"), et
+        // l'incohérence avec l'opérateur pondéré utilisé pour résoudre la pression
+        // (ci-dessus) produit des stries numériques exactement à l'interface eau/air.
         for i in 1..=(N as usize + 1) {
             for j in 1..=(N as usize) {
-                // Ne pas aller au-delà de la dernière cellule horizontale
                 let idx = self.to_index(i, j);
                 if !self.cells[idx].wall {
-                    // Corriger u(i,j) (vitesse horizontale à la face de gauche de la cellule)
                     let p_left = if i > 1 {
                         pressure[self.to_index(i-1, j)]
                     } else {
-                        pressure[idx] // Réflexion à la frontière
+                        pressure[idx]
                     };
                     let p_right = pressure[idx];
 
-                    // Gradient de pression : ∂p/∂x
-                    self.cells[idx].velocity_x -= (p_right - p_left) / h;
+                    let w_face = if ENABLE_WATER {
+                        let rho_right = self.local_rho(idx);
+                        let rho_left = if i > 1 {
+                            self.local_rho(self.to_index(i-1, j))
+                        } else {
+                            rho_right
+                        };
+                        2.0 / (rho_left + rho_right)
+                    } else {
+                        1.0
+                    };
+
+                    self.cells[idx].velocity_x -= w_face * (p_right - p_left) / h;
                 }
 
-                // Ne pas aller au-delà de la dernière cellule verticale
                 let idx = self.to_index(i, j);
                 if !self.cells[idx].wall {
-                    // Corriger v(i,j) (vitesse verticale à la face du bas de la cellule)
                     let p_bottom = if j > 1 {
                         pressure[self.to_index(i, j-1)]
                     } else {
-                        pressure[idx] // Réflexion à la frontière //
+                        pressure[idx]
                     };
                     let p_top = pressure[idx];
 
-                    // Gradient de pression: ∂p/∂y
-                    self.cells[idx].velocity_y -= (p_top - p_bottom) / h;
+                    let w_face = if ENABLE_WATER {
+                        let rho_top = self.local_rho(idx);
+                        let rho_bottom = if j > 1 {
+                            self.local_rho(self.to_index(i, j-1))
+                        } else {
+                            rho_top
+                        };
+                        2.0 / (rho_bottom + rho_top)
+                    } else {
+                        1.0
+                    };
+
+                    self.cells[idx].velocity_y -= w_face * (p_top - p_bottom) / h;
                 }
             }
         }
@@ -1197,27 +1220,29 @@ impl Grid {
 
 
     /// Perform a step in the simulation with another method
-    pub fn vel2_step(&mut self, inflow_velocity : f32) {
-        self.water_step(DT);
+    pub fn vel2_step(&mut self, inflow_velocity: f32) {
+        if ENABLE_WATER {
+            self.apply_gravity(GRAVITY_X, GRAVITY_Y, DT);   // <-- AVANT project()
+        }
 
-        if PROJECT == "1"{
+        if PROJECT == "1" {
             self.project();
-        } else if PROJECT == "2"{
+        } else if PROJECT == "2" {
             panic!("PROJECT2 non implémenté pour le moment");
         } else {
             panic!("Valeur PROJECT invalide");
         }
+
         self.apply_boundary_conditions(inflow_velocity);
-        //println!("Total density after project {:2}", self.total_density());
         self.extrapolate();
-        //println!("Total density after extrapolate {:2}", self.total_density());
         self.advect_velocity(DT);
-        if ENABLE_WATER == true {
-            self.clamp_velocity_field(MAX_VELOCITY); // <-- AJOUT
-        }
-        //println!("Total density after advect velocity {:2}", self.total_density());
         self.advect_density(DT);
-        //println!("Total density after apres advect density {:2}", self.total_density());
+
+        if ENABLE_WATER == true{
+            self.advect_phase(DT);
+            self.clamp_velocity_field(MAX_VELOCITY);
+        }
+
         self.apply_boundary_conditions(inflow_velocity);
     }
 

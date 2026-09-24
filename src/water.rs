@@ -209,22 +209,27 @@ impl Grid {
             .sum()
     }
 
-    /// Étape complète "eau" à appeler une fois par pas de temps, typiquement
-    /// juste avant `project()` dans votre boucle de simulation (voir
-    /// INTEGRATION.md pour l'emplacement exact dans vel2_step).
-    pub fn water_step(&mut self, dt: f32) {
-        if !ENABLE_WATER {
-            return;
-        }
-        self.apply_gravity(GRAVITY_X, GRAVITY_Y, dt);
-        self.advect_phase(dt);
-    }
-
+    /// NOTE IMPORTANTE SUR L'ORDRE D'APPEL :
+    /// `apply_gravity` doit être appelé AVANT `project()` (pour que la
+    /// pression puisse réagir à la gravité), mais `advect_phase` doit être
+    /// appelé APRÈS `project()` ET `apply_boundary_conditions()` — jamais
+    /// avant, et jamais regroupés dans un seul appel en début de tick.
+    ///
+    /// Raison : entre l'ajout de la gravité et l'application des conditions
+    /// aux limites, la face de fond (v(i, N+1)) porte une petite vitesse
+    /// vers le bas qui n'a pas encore été annulée par la condition de sol
+    /// solide. Si `advect_phase` utilise ce champ non corrigé, l'eau fuit
+    /// légèrement par le fond à chaque tick — c'est ce qui produit
+    /// l'impression d'implosion observée. Voir INTEGRATION.md, section 4,
+    /// pour le placement exact des deux appels dans vel2_step.
 
     /// Sécurité anti-divergence : limite la norme de chaque composante de
-    /// vitesse. À utiliser pendant la mise au point du solveur bi-fluide ;
-    /// une fois la convergence de project() validée (voir section A), cette
-    /// fonction ne devrait plus jamais être sollicitée en régime normal.
+    /// vitesse. À utiliser pendant la mise au point du solveur bi-fluide
+    /// (voir STABILITE_PERF.md, section C) ; une fois la convergence de
+    /// `project()` validée, cette fonction ne devrait plus jamais être
+    /// sollicitée en régime normal — si elle l'est en permanence, c'est le
+    /// signe que le solveur de pression ne converge pas assez vite pour le
+    /// ratio de densité actuel (voir STABILITE_PERF.md, section D).
     pub fn clamp_velocity_field(&mut self, max_speed: f32) {
         for cell in self.cells.iter_mut() {
             if cell.wall {

@@ -55,7 +55,7 @@ pub const AIR_FLOW: bool = true; // Simulate air flow
 pub const FLOW_DIRECTION: &str = "right"; //"left","right","up","down" // Direction of the flow (for now only right is properly implemented)
 pub const FLOW_SPACE: usize = 2; // Space between two rows of flow
 pub const FLOW_DENSITY: f32 = 15.0; // Density of the flow
-pub const FLOW_VELOCITY: f32 = if AIR_FLOW == true {2.7} else { 0.0 }; // Velocity of the flow
+pub const FLOW_VELOCITY: f32 = if AIR_FLOW == true {0.0} else { 0.0 }; // Velocity of the flow
 pub const DRAW_VELOCITY_VECTORS: bool = false; // Draw velocity vectors
 pub const VECTOR_SIZE_FACTOR : f32 = 8.0 ; // Factor for the size of the velocity vector
 pub const INFLOW_VELOCITY: f32 = FLOW_VELOCITY; // Always force inflow velocity to be equal to the flow velocity
@@ -103,7 +103,7 @@ pub const W_TORQUE: f32 = 1.0;
 /// Active la simulation bi-fluide (eau + air) sur `Grid` (grid.rs).
 /// Quand false, le comportement est strictement identique à avant : gravité
 /// nulle, pas de champ `phase` pris en compte dans la projection.
-pub const ENABLE_WATER: bool = false;
+pub const ENABLE_WATER: bool = true;
 
 /// Densité de l'air (kg/m^3, ordre de grandeur réel — l'échelle absolue
 /// importe peu, seul le RATIO RHO_WATER/RHO_AIR compte pour la physique).
@@ -133,7 +133,7 @@ pub const WATER_LEVEL: f32 = N * 0.6;
 /// une petite valeur et augmentez progressivement pour garder la stabilité
 /// numérique du solveur de pression.
 pub const GRAVITY_X: f32 = 0.0;
-pub const GRAVITY_Y: f32 = 9.81;
+pub const GRAVITY_Y: f32 = 0.05;
 
 /// Nombre d'itérations Gauss-Seidel pour la projection de pression en mode
 /// bi-fluide. Le contraste de densité ralentit la convergence : à ajuster à
