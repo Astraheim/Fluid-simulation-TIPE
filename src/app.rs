@@ -23,6 +23,7 @@ enum DisplayMode {
     Vorticity,
     Pressure,
     Velocity,
+    Phase,
 }
 
 /// Forme à stamper au centre de la grille lors d'un redémarrage.
@@ -336,6 +337,7 @@ fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode, vo
                         (vx * vx + vy * vy).sqrt()
                     }
                     DisplayMode::Density => 0.0,
+                    DisplayMode::Phase => grid.cells[idx].phase.abs(),
                 };
                 if v > max_abs {
                     max_abs = v;
@@ -366,6 +368,14 @@ fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode, vo
                         let vy = grid.cells[idx].velocity_y;
                         let speed = (vx * vx + vy * vy).sqrt();
                         sequential_colormap(speed / max_abs)
+                    }
+                    DisplayMode::Phase => {
+                        let t = grid.cells[idx].phase.clamp(0.0, 1.0);
+                        // bleu foncé (eau) -> blanc/bleu clair (air)
+                        let r = (200.0 * (1.0 - t) + 20.0 * t) as u8;
+                        let g = (220.0 * (1.0 - t) + 60.0 * t) as u8;
+                        let b = (255.0 * (1.0 - t) + 160.0 * t) as u8;
+                        [r, g, b, 255]
                     }
                 }
             };
@@ -414,12 +424,15 @@ fn setup_config(grid: &mut Grid, config: ConfigKind, hole_pos: &[usize]) {
     match config {
         ConfigKind::ClassicFlow => {
             grid.setup_wind_tunnel_walls(hole_pos);
+            grid.init_water(WATER_LEVEL);
         }
         ConfigKind::CenterSource => {
             // Pas de murs fixes : seule l'injection au centre est nécessaire.
+            grid.init_water(WATER_LEVEL);
         }
         ConfigKind::KarmanVortex => {
             grid.setup_karman_vortex();
+            grid.init_water(WATER_LEVEL);
         }
     }
 }
@@ -584,6 +597,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                 ui.radio_value(&mut params.display_mode, DisplayMode::Vorticity, "Vorticité (gradient)");
                                 ui.radio_value(&mut params.display_mode, DisplayMode::Pressure, "Pression (gradient)");
                                 ui.radio_value(&mut params.display_mode, DisplayMode::Velocity, "Vitesse (gradient)");
+                                ui.radio_value(&mut params.display_mode, DisplayMode::Phase, "Phase");
                                 if params.display_mode == DisplayMode::Vorticity {
                                     ui.add(egui::Slider::new(&mut params.vorticity_gain, 0.3..=5.0).text("Contraste vorticité"));
                                 }

@@ -11,6 +11,7 @@ mod objects;
 mod grid2;
 mod pressure_computation2;
 mod app;
+mod water;
 
 fn main() {
     let start = Instant::now();
@@ -70,6 +71,8 @@ fn main() {
     else if GRID == "3" {
 
         let mut grid = Grid::new();
+        
+        grid.init_water(WATER_LEVEL);
 
         Grid::triangle(&mut grid, 100, 250, 20.0);
 

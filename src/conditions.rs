@@ -1,5 +1,5 @@
 // Last update to rendu_code_tex: 2025-05-02
-// last modif: 2025-05-09
+// last modif: 2025-05-09 (+ ajout module eau)
 
 /*
 FR :
@@ -7,15 +7,20 @@ FR :
     Il permet de configurer facilement la fenêtre (taille, adaptation à la grille), le comportement du fluide (viscosité, flux, vortex),
     le choix des algorithmes (projection, advection), ainsi que les sources de densité et de vitesse.
 
-    L’objectif est de rendre la simulation modulaire, expérimentable, et facilement ajustable sans toucher au cœur du moteur.
-
+    NOUVEAU : paramètres pour la simulation bi-fluide (eau + air) via une méthode VOF
+    (Volume Of Fluid) : un champ `phase` par cellule (0 = air, 1 = eau), une densité
+    locale interpolée entre RHO_AIR et RHO_WATER, et une gravité réactivée pour faire
+    apparaître la surface libre, la poussée d'Archimède et les vagues.
 
 ENG :
     This file centralizes all parameters for the simulation : display, grid, fluid properties, numerical methods, etc.
     It allows configuring the window (size, grid adaptation), fluid behavior (viscosity, flows, vortex),
     algorithm choices (projection, advection), and sources of density and velocity.
 
-    The goal is to make the simulation modular, easy to experiment with, and adjustable without touching core engine logic.
+    NEW: parameters for two-fluid (water + air) simulation via a VOF (Volume Of Fluid)
+    method: a per-cell `phase` field (0 = air, 1 = water), a local density interpolated
+    between RHO_AIR and RHO_WATER, and gravity re-enabled to produce the free surface,
+    buoyancy, and waves.
 */
 use crate::grid2::Vector22;
 
@@ -70,6 +75,10 @@ pub const SIZE: f32 = (N + 2.0) * (N + 2.0); // IT WILL BE AN INTEGER \\
 // Physical parameters
 pub const DT: f32 = 1.0/60.0; // Time step (in seconds)
 pub fn gravity() -> Vector22 {
+    // Utilisée par Grid2 (grid2.rs). Laissée à zéro par défaut : Grid2 est le
+    // module expérimental Morton, indépendant du module eau ci-dessous, qui
+    // cible Grid (grid.rs). Si vous voulez de la gravité sur Grid2 aussi,
+    // remplacez cette valeur par Vector22::new(GRAVITY_X, GRAVITY_Y).
     let gravity: Vector22 = Vector22::new(0.0, 0.0); // Gravity (in m/s^)
     gravity
 }
@@ -85,3 +94,52 @@ pub const LOG: bool = false; // Log simulation data
 // Ship parameters
 pub const W_DRAG: f32 = 1.0;
 pub const W_TORQUE: f32 = 1.0;
+
+
+// ============================================================================
+// EAU / SIMULATION BI-FLUIDE (VOF) — voir water.rs
+// ============================================================================
+
+/// Active la simulation bi-fluide (eau + air) sur `Grid` (grid.rs).
+/// Quand false, le comportement est strictement identique à avant : gravité
+/// nulle, pas de champ `phase` pris en compte dans la projection.
+pub const ENABLE_WATER: bool = false;
+
+/// Densité de l'air (kg/m^3, ordre de grandeur réel — l'échelle absolue
+/// importe peu, seul le RATIO RHO_WATER/RHO_AIR compte pour la physique).
+pub const RHO_AIR: f32 = 1.0;
+
+/// Densité de l'eau (kg/m^3).
+///
+/// IMPORTANT : ratio volontairement réduit (25:1 au lieu du ratio physique
+/// ~833:1) pour que le solveur de pression Gauss-Seidel actuel converge en
+/// un nombre d'itérations raisonnable. Une fois le comportement validé
+/// (surface libre stable, flottaison correcte, pas de bruit numérique),
+/// remontez progressivement cette valeur vers 1000.0 en augmentant en
+/// parallèle WATER_PROJECT_ITERATIONS et en surveillant la convergence
+/// (voir STABILITE_PERF.md, sections A et D).
+pub const RHO_WATER: f32 = 25.0;
+
+/// Hauteur initiale de la ligne de flottaison, en indices de cellule j
+/// (0 = haut de la grille, N = bas). Toute cellule avec j >= WATER_LEVEL est
+/// initialisée comme eau (phase = 1.0), le reste comme air (phase = 0.0).
+/// Ajustez selon l'orientation de votre grille à l'écran.
+pub const WATER_LEVEL: f32 = N * 0.6;
+
+/// Composantes de la gravité appliquée à `Grid` (grid.rs) lorsque
+/// ENABLE_WATER est actif. Exprimée en unités de grille par seconde^2 :
+/// avec DT = 1/60 s et une grille de N=510 cellules, une valeur physique de
+/// 9.81 m/s^2 doit être mise à l'échelle de votre simulation — commencez par
+/// une petite valeur et augmentez progressivement pour garder la stabilité
+/// numérique du solveur de pression.
+pub const GRAVITY_X: f32 = 0.0;
+pub const GRAVITY_Y: f32 = 9.81;
+
+/// Nombre d'itérations Gauss-Seidel pour la projection de pression en mode
+/// bi-fluide. Le contraste de densité ralentit la convergence : à ajuster à
+/// la hausse si vous augmentez RHO_WATER (voir STABILITE_PERF.md).
+pub const WATER_PROJECT_ITERATIONS: usize = 60;
+
+/// Vitesse maximale autorisée par composante (unités de grille/s) en mode
+/// eau, purement défensive le temps de stabiliser le solveur de pression.
+pub const MAX_VELOCITY: f32 = 15.0;

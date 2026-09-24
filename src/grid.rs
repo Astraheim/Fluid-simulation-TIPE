@@ -23,6 +23,7 @@ pub struct Cell {
     pub density_yy: f32,
     pub density_xy: f32,
     pub wall: bool,
+    pub phase: f32,
 }
 
 
@@ -625,8 +626,46 @@ impl Grid {
         }
 
         // Résoudre l'équation de Poisson pour la pression
+        // Précalcul des poids de densité (1/ρ moyenné à chaque face) — une seule
+        // fois par appel à project(), PAS à chaque itération Gauss-Seidel.
+        let (w_l_arr, w_r_arr, w_b_arr, w_t_arr, w_sum_arr): (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) =
+            if ENABLE_WATER == true {
+                let mut w_l = vec![0.0f32; SIZE as usize];
+                let mut w_r = vec![0.0f32; SIZE as usize];
+                let mut w_b = vec![0.0f32; SIZE as usize];
+                let mut w_t = vec![0.0f32; SIZE as usize];
+                let mut w_sum = vec![1.0f32; SIZE as usize]; // évite /0 par défaut
+
+                for i in 1..=(N as usize) {
+                    for j in 1..=(N as usize) {
+                        let idx = self.to_index(i, j);
+                        if self.cells[idx].wall { continue; }
+
+                        let rho_c = self.local_rho(idx);
+                        let rho_l = if i > 1 { self.local_rho(self.to_index(i - 1, j)) } else { rho_c };
+                        let rho_r = if i < N as usize { self.local_rho(self.to_index(i + 1, j)) } else { rho_c };
+                        let rho_b = if j > 1 { self.local_rho(self.to_index(i, j - 1)) } else { rho_c };
+                        let rho_t = if j < N as usize { self.local_rho(self.to_index(i, j + 1)) } else { rho_c };
+
+                        let wl = 2.0 / (rho_c + rho_l);
+                        let wr = 2.0 / (rho_c + rho_r);
+                        let wb = 2.0 / (rho_c + rho_b);
+                        let wt = 2.0 / (rho_c + rho_t);
+
+                        w_l[idx] = wl;
+                        w_r[idx] = wr;
+                        w_b[idx] = wb;
+                        w_t[idx] = wt;
+                        w_sum[idx] = (wl + wr + wb + wt).max(1e-6);
+                    }
+                }
+                (w_l, w_r, w_b, w_t, w_sum)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
+
         let tolerance = 1e-5;
-        for _ in 0..20 {
+        for _ in 0..(if ENABLE_WATER == true { WATER_PROJECT_ITERATIONS } else { 20 }) {
             let mut max_error: f32 = 0.0;
 
             for i in 1..=(N as usize) {
@@ -661,7 +700,14 @@ impl Grid {
                         pressure[idx] // Réflexion à la paroi
                     };
 
-                    let p_new = (div[idx] + p_left + p_right + p_bottom + p_top) / 4.0;
+                    let p_new = if ENABLE_WATER == true {
+                        (div[idx]
+                            + w_l_arr[idx] * p_left + w_r_arr[idx] * p_right
+                            + w_b_arr[idx] * p_bottom + w_t_arr[idx] * p_top) / w_sum_arr[idx]
+                    } else {
+                        (div[idx] + p_left + p_right + p_bottom + p_top) / 4.0
+                    };
+
                     let err = (p_new - pressure[idx]).abs();
                     max_error = max_error.max(err);
                     pressure[idx] = p_new;
@@ -732,7 +778,11 @@ impl Grid {
         // Conditions aux limites pour la vitesse horizontale u
         for j in 1..=n {
             // Entrée à gauche (inflow)
-            self.set_u(1, j, inflow_velocity);
+            // Entrée à gauche (inflow) : n'injecter la vitesse d'air qu'en proportion
+            // de la fraction d'air locale — l'eau n'est pas soufflée à la vitesse du vent.
+            let idx_here = self.to_index(1, j);
+            let air_fraction = 1.0 - self.cells[idx_here].phase.clamp(0.0, 1.0);
+            self.set_u(1, j, inflow_velocity * air_fraction);
 
             // Sortie à droite (outflow): ∂u/∂x = 0
             self.set_u(n+1, j, self.get_u(n, j));
@@ -748,11 +798,16 @@ impl Grid {
 
         // Conditions aux limites pour la vitesse verticale v
         for i in 1..=n {
-            // Haut: ∂v/∂y = 0
+            // Haut: ∂v/∂y = 0 (le ciel reste ouvert, inchangé)
             self.set_v(i, 1, self.get_v(i, 2));
 
-            // Bas: ∂v/∂y = 0
-            self.set_v(i, n+1, self.get_v(i, n));
+            // Bas: sol solide en mode eau (empêche l'eau de fuir hors du domaine),
+            // sinon comportement d'origine (sortie libre) en mono-fluide.
+            if ENABLE_WATER == true {
+                self.set_v(i, n+1, 0.0);
+            } else {
+                self.set_v(i, n+1, self.get_v(i, n));
+            }
 
             // Parois (no-slip)
             for j in 1..=n+1 {
@@ -1067,7 +1122,18 @@ impl Grid {
         for i in (left_wall + 2)..=right_wall - 5 {
             for j in 2..=N as usize - 1 {
                 let idx = self.to_index(i, j);
-                if !self.cells[idx].wall { // Ensure this is not a wall
+                if self.cells[idx].wall {
+                    continue;
+                }
+
+                if ENABLE_WATER == true {
+                    let air_fraction = 1.0 - self.cells[idx].phase.clamp(0.0, 1.0);
+                    if air_fraction < 0.5 {
+                        // Cellule majoritairement eau : pas d'injection d'air ici.
+                        continue;
+                    }
+                    self.cell_init(i, j, flow_velocity * air_fraction, 0.0, density * air_fraction);
+                } else {
                     self.cell_init(i, j, flow_velocity, 0.0, density);
                 }
             }
@@ -1132,6 +1198,8 @@ impl Grid {
 
     /// Perform a step in the simulation with another method
     pub fn vel2_step(&mut self, inflow_velocity : f32) {
+        self.water_step(DT);
+
         if PROJECT == "1"{
             self.project();
         } else if PROJECT == "2"{
@@ -1144,6 +1212,9 @@ impl Grid {
         self.extrapolate();
         //println!("Total density after extrapolate {:2}", self.total_density());
         self.advect_velocity(DT);
+        if ENABLE_WATER == true {
+            self.clamp_velocity_field(MAX_VELOCITY); // <-- AJOUT
+        }
         //println!("Total density after advect velocity {:2}", self.total_density());
         self.advect_density(DT);
         //println!("Total density after apres advect density {:2}", self.total_density());
