@@ -103,7 +103,7 @@ pub const W_TORQUE: f32 = 1.0;
 /// Active la simulation bi-fluide (eau + air) sur `Grid` (grid.rs).
 /// Quand false, le comportement est strictement identique à avant : gravité
 /// nulle, pas de champ `phase` pris en compte dans la projection.
-pub const ENABLE_WATER: bool = true;
+pub const ENABLE_WATER: bool = false;
 
 /// Densité de l'air (kg/m^3, ordre de grandeur réel — l'échelle absolue
 /// importe peu, seul le RATIO RHO_WATER/RHO_AIR compte pour la physique).

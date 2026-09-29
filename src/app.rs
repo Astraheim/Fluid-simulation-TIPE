@@ -104,7 +104,7 @@ impl Default for SimParams {
             straight_line_mode: false,
             display_mode: DisplayMode::Density,
             min_cells_to_plot: 20,
-            min_column_x: 0.0,
+            min_column_x: 20.0,
             vorticity_gain: 1.8,
             pressure_gain: 1.8,
         }
@@ -584,7 +584,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                         egui::SidePanel::right("controls").show(ctx, |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 ui.heading("Paramètres");
-                                ui.add(egui::Slider::new(&mut params.flow_velocity, 0.0..=5.0).text("Vitesse flux"));
+                                ui.add(egui::Slider::new(&mut params.flow_velocity, 0.0..=10.0).text("Vitesse flux"));
                                 ui.add(egui::Slider::new(&mut params.flow_density, 0.0..=50.0).text("Densité flux"));
                                 ui.add(egui::Slider::new(&mut params.viscosity, 0.0..=0.01).text("Viscosité"));
                                 ui.separator();
@@ -599,10 +599,10 @@ pub fn run_app(mut grid: Grid) -> ! {
                                 ui.radio_value(&mut params.display_mode, DisplayMode::Velocity, "Vitesse (gradient)");
                                 ui.radio_value(&mut params.display_mode, DisplayMode::Phase, "Phase");
                                 if params.display_mode == DisplayMode::Vorticity {
-                                    ui.add(egui::Slider::new(&mut params.vorticity_gain, 0.3..=5.0).text("Contraste vorticité"));
+                                    ui.add(egui::Slider::new(&mut params.vorticity_gain, 0.5..=5.0).text("Contraste vorticité"));
                                 }
                                 if params.display_mode == DisplayMode::Pressure {
-                                    ui.add(egui::Slider::new(&mut params.pressure_gain, 0.3..=5.0).text("Contraste pression"));
+                                    ui.add(egui::Slider::new(&mut params.pressure_gain, 0.5..=5.0).text("Contraste pression"));
                                 }
 
                                 ui.separator();
