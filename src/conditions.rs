@@ -143,3 +143,55 @@ pub const WATER_PROJECT_ITERATIONS: usize = 60;
 /// Vitesse maximale autorisée par composante (unités de grille/s) en mode
 /// eau, purement défensive le temps de stabiliser le solveur de pression.
 pub const MAX_VELOCITY: f32 = 15.0;
+
+
+// ============================================================================
+// PROFIL DE VENT (couche limite atmosphérique)
+// ============================================================================
+
+/// Profil vertical du vent en entrée : "uniform" | "power" | "log"
+pub const WIND_PROFILE: &str = "power";
+
+/// Hauteur de référence (en cellules, au-dessus du sol/de la mer) à laquelle
+/// la vitesse du vent vaut exactement `flow_velocity` (le slider).
+pub const WIND_REF_HEIGHT: f32 = N * 0.25;
+
+/// Exposant de la loi de puissance (~0.11 mer ouverte, ~0.14 côte, ~0.25 ville).
+pub const WIND_ALPHA: f32 = 0.14;
+
+/// Longueur de rugosité z0 de la loi log, en cellules (doit rester < 1 cellule).
+pub const WIND_Z0: f32 = 0.01;
+
+/// Hauteur minimale utilisée dans le calcul (évite z = 0 près du sol), en cellules.
+pub const WIND_MIN_HEIGHT: f32 = 0.5;
+
+/// Facteur maximal autorisé (limite la vitesse en haut du domaine).
+pub const WIND_MAX_FACTOR: f32 = 1.6;
+
+/// Indice j du "sol" : la surface de l'eau en mode eau, sinon le bas de la grille.
+/// (j = 0 est le haut de la grille, j = N le bas.)
+pub fn wind_ground_j() -> f32 {
+    if ENABLE_WATER { WATER_LEVEL } else { N + 1.0 }
+}
+
+/// Facteur multiplicatif u(z)/u_ref à appliquer à la vitesse d'entrée
+/// pour la ligne j de la grille.
+pub fn wind_profile_factor(j: usize) -> f32 {
+    if WIND_PROFILE == "uniform" {
+        return 1.0;
+    }
+
+    // Hauteur au-dessus du sol, en cellules
+    let z = (wind_ground_j() - j as f32).max(WIND_MIN_HEIGHT);
+
+    let f = match WIND_PROFILE {
+        "power" => (z / WIND_REF_HEIGHT).powf(WIND_ALPHA),
+        "log" => {
+            let z = z.max(WIND_Z0 * 1.01);
+            ((z / WIND_Z0).ln() / (WIND_REF_HEIGHT / WIND_Z0).ln()).max(0.0)
+        }
+        _ => 1.0,
+    };
+
+    f.clamp(0.0, WIND_MAX_FACTOR)
+}

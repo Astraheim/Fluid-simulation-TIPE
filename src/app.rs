@@ -459,7 +459,7 @@ fn inject_for_config(grid: &mut Grid, config: ConfigKind, params: &SimParams, sc
             for j in 1..=(N as usize) {
                 let idx = grid.to_index(1, j);
                 if !grid.cells[idx].wall {
-                    grid.cell_init(1, j, params.flow_velocity, 0.0, params.flow_density);
+                    grid.cell_init(1, j, params.flow_velocity * wind_profile_factor(j), 0.0, params.flow_density);
                 }
             }
         }

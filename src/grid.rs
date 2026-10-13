@@ -805,7 +805,7 @@ impl Grid {
             // de la fraction d'air locale — l'eau n'est pas soufflée à la vitesse du vent.
             let idx_here = self.to_index(1, j);
             let air_fraction = 1.0 - self.cells[idx_here].phase.clamp(0.0, 1.0);
-            self.set_u(1, j, inflow_velocity * air_fraction);
+            self.set_u(1, j, inflow_velocity * air_fraction * wind_profile_factor(j));
 
             // Sortie à droite (outflow): ∂u/∂x = 0
             self.set_u(n+1, j, self.get_u(n, j));
@@ -845,7 +845,7 @@ impl Grid {
 
         // Coin supérieur gauche
         if !self.cells[self.to_index(1, 1)].wall {
-            self.set_u(1, 1, inflow_velocity);
+            self.set_u(1, 1, inflow_velocity * wind_profile_factor(1));
             self.set_v(1, 1, 0.0);
         }
 
@@ -857,7 +857,7 @@ impl Grid {
 
         // Coin inférieur gauche
         if !self.cells[self.to_index(1, n)].wall {
-            self.set_u(1, n, inflow_velocity);
+            self.set_u(1, n, inflow_velocity * wind_profile_factor(n));
             self.set_v(1, n+1, 0.0);
         }
 
@@ -1149,15 +1149,17 @@ impl Grid {
                     continue;
                 }
 
+                // Vitesse locale selon le profil de vent (dépend de la hauteur j)
+                let wf = wind_profile_factor(j);
+
                 if ENABLE_WATER == true {
                     let air_fraction = 1.0 - self.cells[idx].phase.clamp(0.0, 1.0);
                     if air_fraction < 0.5 {
-                        // Cellule majoritairement eau : pas d'injection d'air ici.
                         continue;
                     }
-                    self.cell_init(i, j, flow_velocity * air_fraction, 0.0, density * air_fraction);
+                    self.cell_init(i, j, flow_velocity * wf * air_fraction, 0.0, density * air_fraction);
                 } else {
-                    self.cell_init(i, j, flow_velocity, 0.0, density);
+                    self.cell_init(i, j, flow_velocity * wf, 0.0, density);
                 }
             }
         }
