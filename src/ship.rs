@@ -1,60 +1,36 @@
+//! Géométrie et comparaison de dispositions d'un porte-conteneurs (vue de côté).
+//! Compatible avec les appels existants de src/app.rs.
+//!
+//! La ligne d'eau est statique : elle sert de limite à l'écoulement simulé.
+//! Le fluide sous la ligne d'eau est bloqué, et n'est pas simulé comme de l'eau.
+//! Le dessin détaillé de la partie immergée relève du rendu graphique, pas du solveur.
+
 use crate::conditions::*;
 use crate::grid::{Grid, Vector2};
-use std::collections::HashMap;
 use rand::Rng;
-
-/*
-Module de test pour l'organisation des conteneurs sur le bateau.
-
-Idée générale :
-    - `wall : bool` (dans Cell) reste la seule chose que le solveur fluide connaît.
-    - On garde EN PLUS une table cell_idx → WallKind pour savoir, après coup,
-      quelle cellule murale appartenait à la coque ou à quel conteneur.
-    - compute_wall_forces() (déjà existant, pressure_computation.rs) donne la force
-      PAR CELLULE, avant l'agrégation par objet connexe. On s'en sert directement
-      ici, donc même si un conteneur touche la coque et qu'ils fusionnent dans
-      identify_objects(), on peut quand même isoler leur contribution respective.
-
-Nouveauté (session du jour) :
-    - `build_boat_layout` génère une ShipLayout (coque + conteneurs) à partir
-      de quelques paramètres géométriques et d'une organisation choisie
-      (Grille / Pyramide / Quinconce), pour pouvoir tester rapidement
-      différentes dispositions sans les écrire à la main.
-    - `quick_variants` renvoie directement 3 variantes prêtes à comparer via
-      `compare_layouts`.
-
-Nouveauté (session courante) :
-    - La coque peut désormais avoir une proue et/ou une poupe courbée
-      (`HullCurveSpec`), au lieu d'un simple rectangle plein — se rapprochant
-      d'une vraie silhouette de coque de navire. `curvature` interpole entre
-      un profil pointu (triangulaire) et un profil arrondi (quart d'ellipse).
-    - Des "fairings" (carénages/protections aérodynamiques, cf. la littérature
-      sur les gap-flow-protectors et forecastle fairings) peuvent être ajoutés
-      devant et/ou derrière la pile de conteneurs pour réduire la traînée.
-    - `random_layout` / `random_variants` génèrent des configurations de
-      conteneurs (et de carénages) aléatoires, pour explorer l'espace des
-      configurations plutôt que de comparer seulement 3 dispositions fixes.
-*/
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WallKind {
     Hull,
-    Container(usize), // id du conteneur
-    Fairing,
+    BowHull,
+    SternHull,
+    Container(usize),
+    BowFairing,
+    SternFairing,
+    /// Domaine fictif sous la ligne de flottaison (ne pas compter comme coque).
+    Water,
 }
 
 #[derive(Clone, Debug)]
 pub struct Container {
     pub id: usize,
-    pub center: (isize, isize), // en cellules de grille
+    pub center: (isize, isize),
     pub width: f32,
     pub height: f32,
 }
 
-/// Spécification de la courbure de la coque (proue / poupe).
-/// `curvature` va de 0.0 (extrémité pointue / triangulaire, comme un étrave
-/// "clipper") à 1.0 (extrémité arrondie, quart d'ellipse, plus proche d'un
-/// bulbe d'étrave / d'une poupe à tableau arrondi).
+/// Paramètres historiques, préservés pour compatibilité avec app.rs.
 #[derive(Clone, Copy, Debug)]
 pub struct HullCurveSpec {
     pub curve_bow: bool,
@@ -64,418 +40,510 @@ pub struct HullCurveSpec {
     pub stern_length: f32,
 }
 
-/// Côté sur lequel un carénage (fairing) est placé par rapport à la pile de
-/// conteneurs : Bow = à l'avant (face au vent relatif), Stern = à l'arrière.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FairingSide {
-    Bow,
-    Stern,
+/// Réglages supplémentaires de la vue de côté.
+/// Le programme principal peut les modifier ultérieurement dans egui.
+#[derive(Clone, Copy, Debug)]
+pub struct SideProfileSettings {
+    /// Fraction de hauteur de coque émergée (0..1).
+    pub freeboard_ratio: f32,
+    /// Épaisseur de la ligne de séparation air/eau, en cellules.
+    pub waterline_thickness: usize,
+    /// Inclinaison de l'étrave : 0 verticale, 1 très inclinée.
+    pub bow_rake: f32,
+    /// Surélévation du gaillard avant, exprimée en fraction du franc-bord.
+    pub forecastle_rise: f32,
+    /// Fraction de la longueur de proue occupée par la transition du gaillard.
+    pub forecastle_length_ratio: f32,
+    /// Exposant de la courbure de l'étrave (>0).
+    pub bow_exponent: f32,
+    /// Inclinaison et arrondi de la poupe, gérés indépendamment.
+    pub stern_rake: f32,
+    pub stern_exponent: f32,
 }
 
-/// Un carénage aérodynamique simple (profil en coin/triangle) placé devant
-/// ou derrière la pile de conteneurs, pour limiter le décollement de la
-/// couche limite (cf. "gap-flow protectors" / "forecastle fairings").
+impl Default for SideProfileSettings {
+    fn default() -> Self {
+        Self {
+            freeboard_ratio: 0.50,
+            waterline_thickness: 3,
+            bow_rake: 0.65,
+            forecastle_rise: 0.18,
+            forecastle_length_ratio: 0.65,
+            bow_exponent: 1.35,
+            stern_rake: 0.18,
+            stern_exponent: 1.4,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FairingSide { Bow, Stern }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FairingProfile {
+    Triangular,
+    Rounded,
+    Parabolic,
+    Stepped,
+    TopCover,
+    Sail,
+    Arc,
+}
+
+impl FairingProfile {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Triangular => "Triangulaire",
+            Self::Rounded => "Arrondi",
+            Self::Parabolic => "Parabolique",
+            Self::Stepped => "Étagé",
+            Self::TopCover => "Capot supérieur",
+            Self::Sail => "Voile / rampe",
+            Self::Arc => "Arc courbe",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Fairing {
-    pub position: (isize, isize), // point d'attache, côté pile de conteneurs
-    pub length: f32,               // longueur (protrusion) du carénage
-    pub half_height: f32,          // demi-hauteur à la base (= hauteur de la pile / 2)
+    /// Point de départ du carénage sur le pont (x_start, deck_y).
+    pub position: (isize, isize),
+    pub length: f32,
+    /// Hauteur maximale au-dessus du pont.
+    pub half_height: f32,
     pub side: FairingSide,
+    pub profile: FairingProfile,
+    pub height_scale: f32,
 }
 
 #[derive(Clone, Debug)]
 pub struct ShipLayout {
     pub name: String,
-    /// Rectangles définissant la silhouette de la coque pour cette vue
-    /// (dessus / côté / face). Le corps principal (rectangulaire) de la
-    /// coque ; si `hull_curve` est renseigné, ce rectangle est déjà
-    /// raccourci pour laisser la place aux extrémités courbées.
     pub hull_rects: Vec<((isize, isize), f32, f32)>,
-    /// Courbure optionnelle de la proue/poupe, appliquée en plus de
-    /// `hull_rects[0]`.
     pub hull_curve: Option<HullCurveSpec>,
     pub containers: Vec<Container>,
-    /// Carénages aéro optionnels devant/derrière la pile de conteneurs.
     pub fairings: Vec<Fairing>,
-    /// Direction du flux pour CETTE vue, en radians (0.0 = vers +x, la direction
-    /// "traînée" par rapport à laquelle on projette la force).
     pub flow_angle: f32,
 }
 
-/// Résultat d'un test : forces séparées coque / conteneurs + score global
 #[derive(Clone, Debug)]
 pub struct LayoutResult {
     pub layout_name: String,
     pub hull_force: Vector2,
     pub container_forces: HashMap<usize, Vector2>,
-    pub total_drag: f32,   // projection de la force totale sur flow_angle
-    pub total_torque: f32, // somme des couples individuels (approx, cf. note plus bas)
+    pub total_drag: f32,
+    pub total_torque: f32,
     pub score: f32,
 }
 
+/// Interpolation à dérivée nulle aux deux extrémités.
+fn smoothstep(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 impl Grid {
-    /// Stamp un ShipLayout dans la grille (murs) et renvoie la table d'étiquetage.
-    /// À appeler juste après Grid::new().
-    pub fn apply_layout(&mut self, layout: &ShipLayout) -> HashMap<usize, WallKind> {
-        let mut labels = HashMap::new();
-
-        // 1. Coque : corps principal (rectangle(s))
-        for &(center, w, h) in &layout.hull_rects {
-            self.rectangle(center.0, center.1, w, h);
+    fn fill_vertical(&mut self, x: isize, y0: f32, y1: f32) {
+        if x < 0 || x >= N as isize { return; }
+        let first = y0.min(y1).ceil().max(0.0) as isize;
+        let last = y0.max(y1).floor().min(N - 1.0) as isize;
+        for y in first..=last {
+            self.wall_init(y as usize, x as usize, true);
         }
-
-        // 1b. Extrémités de coque courbées (proue / poupe), si demandé.
-        // On se base sur le premier rectangle de hull_rects comme corps
-        // principal (c'est la convention utilisée par `build_boat_layout`).
-        if let Some(curve) = layout.hull_curve {
-            if let Some(&(center, w, h)) = layout.hull_rects.first() {
-                let half_h = h / 2.0;
-                let half_w = (w / 2.0) as isize;
-
-                if curve.curve_bow && curve.bow_length > 0.0 {
-                    let base_x = center.0 - half_w;
-                    let tip_x = base_x - curve.bow_length as isize;
-                    self.stamp_curved_hull_end(base_x, tip_x, center.1, half_h, curve.curvature);
-                }
-                if curve.curve_stern && curve.stern_length > 0.0 {
-                    let base_x = center.0 + half_w;
-                    let tip_x = base_x + curve.stern_length as isize;
-                    self.stamp_curved_hull_end(base_x, tip_x, center.1, half_h, curve.curvature);
-                }
-            }
-        }
-
-        // On relit la grille pour capturer TOUTES les cellules murales posées par
-        // la coque avant d'ajouter les conteneurs (sinon on ne peut plus les distinguer).
-        for (i, j, idx) in self.iter_morton() {
-            if self.cells[idx].wall {
-                labels.insert(idx, WallKind::Hull);
-            }
-            let _ = (i, j); // évite un warning si non utilisé ailleurs
-        }
-
-        // 2. Conteneurs : on note les indices murés AVANT/APRÈS pour ne
-        //    labelliser que les nouvelles cellules de CE conteneur.
-        for container in &layout.containers {
-            let before: std::collections::HashSet<usize> = self.cells.iter().enumerate()
-                .filter(|(_, c)| c.wall)
-                .map(|(idx, _)| idx)
-                .collect();
-
-            self.rectangle(container.center.0, container.center.1, container.width, container.height);
-
-            for (idx, cell) in self.cells.iter().enumerate() {
-                if cell.wall && !before.contains(&idx) {
-                    labels.insert(idx, WallKind::Container(container.id));
-                }
-            }
-        }
-
-        // 3. Carénages aéro devant/derrière la pile de conteneurs.
-        for fairing in &layout.fairings {
-            let before: std::collections::HashSet<usize> = self.cells.iter().enumerate()
-                .filter(|(_, c)| c.wall)
-                .map(|(idx, _)| idx)
-                .collect();
-
-            self.stamp_fairing(fairing);
-
-            for (idx, cell) in self.cells.iter().enumerate() {
-                if cell.wall && !before.contains(&idx) {
-                    labels.insert(idx, WallKind::Fairing);
-                }
-            }
-        }
-
-        labels
     }
 
-    /// Stamp une extrémité de coque courbée (proue ou poupe) entre `base_x`
-    /// (où la coque a sa pleine demi-hauteur `half_height`) et `tip_x` (la
-    /// pointe, demi-hauteur nulle). `curvature` interpole entre un profil
-    /// triangulaire (0.0) et un profil en quart d'ellipse (1.0, plus arrondi
-    /// / réaliste pour une étrave/poupe de navire).
+    /// Carène basse continue : fond presque plat, sans dents ni bulbe en blocs.
+    fn stamp_underwater_midship(&mut self, left: isize, right: isize, waterline_y: f32, draft: f32) {
+        for x in left.min(right)..=left.max(right) {
+            self.fill_vertical(x, waterline_y, waterline_y + 0.94 * draft);
+        }
+    }
+
+    /// Extrémité immergée : raccord au fond puis remontée progressive vers
+    /// la flottaison. Le modèle représente une silhouette, pas une carène 3D.
+    fn stamp_underwater_end(&mut self, base_x: isize, tip_x: isize, waterline_y: f32, draft: f32, bow: bool) {
+        let length = (tip_x - base_x).unsigned_abs().max(1) as isize;
+        let direction = if tip_x >= base_x { 1 } else { -1 };
+        for s in 0..=length {
+            let x = base_x + direction * s;
+            let t = s as f32 / length as f32;
+            // Étrave avant plus relevée, poupe avec une remontée plus douce.
+            let rise = if bow { smoothstep(t) } else { t * t * (2.0 - t) };
+            let depth = draft * (0.94 - 0.86 * rise);
+            self.fill_vertical(x, waterline_y, waterline_y + depth);
+        }
+    }
+
+    /// Partie émergée de la proue ou de la poupe, en vue de côté.
+    /// L'extrémité est construite entre x=base_x (coque rectangulaire) et x=tip_x.
+    /// Le bas de la silhouette émergée est aligné avec la ligne de flottaison.
+    pub fn stamp_side_hull_end(
+        &mut self,
+        base_x: isize,
+        tip_x: isize,
+        deck_y: f32,
+        waterline_y: f32,
+        bow: bool,
+        settings: &SideProfileSettings,
+    ) {
+        let length = (tip_x - base_x).unsigned_abs().max(1) as isize;
+        let direction = if tip_x >= base_x { 1 } else { -1 };
+        let height = (waterline_y - deck_y).max(1.0);
+        let rake = if bow { settings.bow_rake } else { settings.stern_rake }.clamp(0.0, 1.0);
+        let exponent = if bow { settings.bow_exponent } else { settings.stern_exponent }.clamp(0.2, 6.0);
+
+        for s in 0..=length {
+            let x = base_x + direction * s;
+            let t = s as f32 / length as f32;
+            // La partie haute se relève légèrement vers la proue : gaillard d'avant.
+            let rise = if bow {
+                let start = 1.0 - settings.forecastle_length_ratio.clamp(0.01, 1.0);
+                let progress = ((t - start) / (1.0 - start)).clamp(0.0, 1.0);
+                height * settings.forecastle_rise.clamp(0.0, 0.8) * smoothstep(progress)
+            } else { 0.0 };
+            let top = deck_y - rise;
+            // L'étrave rejoint la ligne de flottaison en progressant vers l'avant.
+            // Quand rake=0, la silhouette devient courte et presque verticale.
+            // Quand rake=1, l'obliquité s'étend sur toute la longueur indiquée.
+            let bottom_factor = if rake < 0.001 {
+                if t < 0.94 { 1.0 } else { ((1.0 - t) / 0.06).clamp(0.0, 1.0) }
+            } else {
+                (1.0 - t.powf(exponent / rake.max(0.1))).clamp(0.0, 1.0)
+            };
+            let bottom = top + (waterline_y - top) * bottom_factor;
+            self.fill_vertical(x, top, bottom);
+        }
+    }
+
+    /// API historique conservée, utile pour les autres types de silhouette.
     pub fn stamp_curved_hull_end(&mut self, base_x: isize, tip_x: isize, center_y: isize, half_height: f32, curvature: f32) {
         let curvature = curvature.clamp(0.0, 1.0);
-        let dir: isize = if tip_x >= base_x { 1 } else { -1 };
+        let dir = if tip_x >= base_x { 1 } else { -1 };
         let length = (tip_x - base_x).unsigned_abs().max(1) as isize;
-
         for s in 0..=length {
             let x = base_x + dir * s;
-            // t : 1.0 à la base (pleine largeur), 0.0 à la pointe
-            let t = 1.0 - (s as f32 / length as f32);
-            let linear = t;
-            let elliptical = (1.0 - (1.0 - t).powi(2)).max(0.0).sqrt();
-            let shape = linear * (1.0 - curvature) + elliptical * curvature;
-            let h = (half_height * shape).round() as isize;
-
-            for dy in -h..=h {
-                let y = center_y + dy;
-                if x >= 0 && y >= 0 {
-                    self.wall_init(y as usize, x as usize, true);
-                }
-            }
+            let t = 1.0 - s as f32 / length as f32;
+            let shape = t * (1.0 - curvature)
+                + (1.0 - (1.0 - t).powi(2)).max(0.0).sqrt() * curvature;
+            let h = half_height * shape;
+            self.fill_vertical(x, center_y as f32 - h, center_y as f32 + h);
         }
     }
 
-    /// Stamp un carénage aéro (profil en coin, qui s'amincit en s'éloignant
-    /// de la pile de conteneurs) devant (Bow) ou derrière (Stern) celle-ci.
     pub fn stamp_fairing(&mut self, fairing: &Fairing) {
-        let dir: isize = match fairing.side {
-            FairingSide::Bow => -1,
-            FairingSide::Stern => 1,
-        };
-        let length = (fairing.length.max(1.0)) as isize;
-        let (base_x, base_y) = fairing.position;
+        let length = fairing.length.max(1.0) as isize;
+        let x0 = fairing.position.0;
+        let deck_y = fairing.position.1 as f32;
+        let full_h = fairing.half_height.max(1.0) * fairing.height_scale.clamp(0.15, 2.5);
 
         for s in 0..=length {
-            let t = 1.0 - (s as f32 / length as f32); // 1.0 à la base, 0.0 à la pointe
-            let h = (fairing.half_height * t).round() as isize;
-            let x = base_x + dir * s;
+            let x = x0 + s;
+            let u = s as f32 / length as f32;
+            let q = match fairing.side {
+                FairingSide::Bow => u,
+                FairingSide::Stern => 1.0 - u,
+            };
+            let h = match fairing.profile {
+                FairingProfile::Triangular => full_h * q,
+                FairingProfile::Rounded => full_h * (1.0 - (1.0 - q).powi(2)).sqrt().clamp(0.0, 1.0),
+                FairingProfile::Parabolic => full_h * (1.0 - (1.0 - q).powi(2)),
+                FairingProfile::Stepped => {
+                    let levels = 5.0;
+                    let stepped = (q * levels).ceil() / levels;
+                    full_h * stepped
+                }
+                FairingProfile::TopCover => {
+                    if q < 0.25 { full_h * (q / 0.25) }
+                    else { full_h * (0.95 - 0.15 * ((q - 0.25) / 0.75)) }
+                }
+                FairingProfile::Sail => full_h * q.powf(0.55),
+                FairingProfile::Arc => full_h * (1.0 - (q - 1.0).abs().powf(1.8)),
+            }.max(0.0);
+            self.fill_vertical(x, deck_y - h, deck_y);
+        }
+    }
 
-            for dy in -h..=h {
-                let y = base_y + dy;
-                if x >= 0 && y >= 0 {
-                    self.wall_init(y as usize, x as usize, true);
+    /// API existante, avec paramètres de profil par défaut.
+    pub fn apply_layout(&mut self, layout: &ShipLayout) -> HashMap<usize, WallKind> {
+        self.apply_layout_with_profile(layout, &SideProfileSettings::default())
+    }
+
+    /// Variante paramétrable : permettra de brancher les nouveaux sliders egui.
+    pub fn apply_layout_with_profile(&mut self, layout: &ShipLayout, settings: &SideProfileSettings) -> HashMap<usize, WallKind> {
+        let mut labels = HashMap::new();
+        let Some(&(main_center, main_width, main_height)) = layout.hull_rects.first() else {
+            return labels;
+        };
+        let deck_y = main_center.1 as f32 - main_height / 2.0;
+        let waterline_y = deck_y + main_height * settings.freeboard_ratio.clamp(0.05, 0.95);
+
+        // Ligne de séparation air/eau : seulement une bande fine, pour garder
+        // la coque immergée visible à l'écran.
+        let band_thickness = settings.waterline_thickness.max(1) as isize;
+        let band_center = waterline_y.round() as isize;
+        let band_start = (band_center - band_thickness / 2).max(0);
+        let band_end = (band_start + band_thickness - 1).min(N as isize - 1);
+        for y in band_start..=band_end {
+            for x in 0..(N as isize) {
+                self.wall_init(y as usize, x as usize, true);
+            }
+        }
+        for y in band_start..=band_end {
+            for x in 0..(N as usize) {
+                let idx = self.to_index(x, y as usize);
+                if idx < self.cells.len() && self.cells[idx].wall {
+                    labels.insert(idx, WallKind::Water);
                 }
             }
         }
+
+        // Corps principal : on sépare désormais la partie émergée et la carène
+        // sous-marine pour obtenir une silhouette plus réaliste en vue de côté.
+        let draft = (main_height * (1.0 - settings.freeboard_ratio.clamp(0.05, 0.95))).max(2.0);
+        let main_left = main_center.0 - (main_width / 2.0) as isize;
+        let main_right = main_center.0 + (main_width / 2.0) as isize;
+
+        let before_mid: HashSet<usize> = self.cells.iter().enumerate().filter(|(_, c)| c.wall).map(|(i, _)| i).collect();
+        for &(center, width, height) in &layout.hull_rects {
+            let top = center.1 as f32 - height / 2.0;
+            let left = center.0 - (width / 2.0) as isize;
+            let right = center.0 + (width / 2.0) as isize;
+            for x in left..=right { self.fill_vertical(x, top, waterline_y); }
+        }
+        self.stamp_underwater_midship(main_left, main_right, waterline_y, draft);
+        for (idx, cell) in self.cells.iter().enumerate() {
+            if cell.wall && !before_mid.contains(&idx) && !labels.contains_key(&idx) {
+                labels.insert(idx, WallKind::Hull);
+            }
+        }
+
+        if let Some(curve) = layout.hull_curve {
+            let half_w = (main_width / 2.0) as isize;
+            if curve.curve_bow && curve.bow_length > 0.0 {
+                let before: HashSet<usize> = self.cells.iter().enumerate().filter(|(_, c)| c.wall).map(|(i, _)| i).collect();
+                let base = main_center.0 - half_w;
+                let tip = base - curve.bow_length as isize;
+                self.stamp_side_hull_end(base, tip, deck_y, waterline_y, true, settings);
+                self.stamp_underwater_end(base, tip, waterline_y, draft, true);
+                for (idx, cell) in self.cells.iter().enumerate() {
+                    if cell.wall && !before.contains(&idx) && !labels.contains_key(&idx) {
+                        labels.insert(idx, WallKind::BowHull);
+                    }
+                }
+            }
+            if curve.curve_stern && curve.stern_length > 0.0 {
+                let before: HashSet<usize> = self.cells.iter().enumerate().filter(|(_, c)| c.wall).map(|(i, _)| i).collect();
+                let base = main_center.0 + half_w;
+                let tip = base + curve.stern_length as isize;
+                self.stamp_side_hull_end(base, tip, deck_y, waterline_y, false, settings);
+                self.stamp_underwater_end(base, tip, waterline_y, draft * 0.92, false);
+                for (idx, cell) in self.cells.iter().enumerate() {
+                    if cell.wall && !before.contains(&idx) && !labels.contains_key(&idx) {
+                        labels.insert(idx, WallKind::SternHull);
+                    }
+                }
+            }
+        }
+
+        for c in &layout.containers {
+            let before: HashSet<usize> = self.cells.iter().enumerate().filter(|(_, c)| c.wall).map(|(i, _)| i).collect();
+            self.rectangle(c.center.0, c.center.1, c.width, c.height);
+            for (idx, cell) in self.cells.iter().enumerate() {
+                if cell.wall && !before.contains(&idx) { labels.insert(idx, WallKind::Container(c.id)); }
+            }
+        }
+        for fairing in &layout.fairings {
+            let before: HashSet<usize> = self.cells.iter().enumerate().filter(|(_, c)| c.wall).map(|(i, _)| i).collect();
+            self.stamp_fairing(fairing);
+            for (idx, cell) in self.cells.iter().enumerate() {
+                if cell.wall && !before.contains(&idx) {
+                    labels.insert(idx, match fairing.side {
+                        FairingSide::Bow => WallKind::BowFairing,
+                        FairingSide::Stern => WallKind::SternFairing,
+                    });
+                }
+            }
+        }
+        labels
     }
 }
 
-/// Fait tourner `steps` pas de simulation SANS fenêtre (headless), puis
-/// calcule les forces séparées coque/conteneurs et le score pondéré.
-///
-/// NB IMPORTANT sur le couple : compute_object_forces() calcule un couple par
-/// OBJET CONNEXE (via identify_objects/DFS), pas par étiquette. Si un conteneur
-/// touche la coque, ils forment un seul objet et le couple sera celui du bloc
-/// entier, pas celui du conteneur isolé. Pour un couple isolé par conteneur, il
-/// faudrait réimplémenter le calcul de couple ici à partir de compute_wall_forces()
-/// + labels (même logique que compute_object_forces mais filtrée par WallKind).
-/// Je laisse cette version simple (couple global de l'ensemble coque+conteneurs)
-/// pour commencer — on l'affine si le couple par conteneur s'avère nécessaire.
 pub fn test_layout(layout: &ShipLayout, steps: usize, hole_pos: &[usize]) -> LayoutResult {
     let mut grid = Grid::new();
     let labels = grid.apply_layout(layout);
-
+    grid.setup_wind_tunnel_walls(hole_pos);
+    let max_hole_row = hole_pos.iter().copied().max().unwrap_or(N as usize);
     for _ in 0..steps {
-        grid.initialize_wind_tunnel(FLOW_DENSITY, FLOW_VELOCITY, hole_pos);
+        let left_wall = 1;
+        let box_width = (N as usize / 30).max(2);
+        let right_wall = left_wall + box_width;
+        for i in (left_wall + 2)..=right_wall.saturating_sub(5) {
+            for j in 2..max_hole_row {
+                let idx = grid.to_index(i, j);
+                if grid.cells[idx].wall { continue; }
+                let wf = wind_profile_factor(j);
+                grid.cell_init(i, j, FLOW_VELOCITY * wf, 0.0, FLOW_DENSITY);
+            }
+        }
         grid.vel2_step(FLOW_VELOCITY);
     }
-
     let cell_forces = grid.compute_wall_forces();
-
     let mut hull_force = Vector2::default();
     let mut container_forces: HashMap<usize, Vector2> = HashMap::new();
-
-    for (idx, kind) in &labels {
-        let f = cell_forces[*idx];
+    for (&idx, &kind) in &labels {
+        let f = cell_forces[idx];
         match kind {
-            WallKind::Hull | WallKind::Fairing => {
+            WallKind::Hull | WallKind::BowHull | WallKind::SternHull | WallKind::BowFairing | WallKind::SternFairing => {
                 hull_force.x += f.x;
                 hull_force.y += f.y;
             }
             WallKind::Container(id) => {
-                let entry = container_forces.entry(*id).or_insert(Vector2::default());
+                let entry = container_forces.entry(id).or_insert(Vector2::default());
                 entry.x += f.x;
                 entry.y += f.y;
             }
+            WallKind::Water => {}
         }
     }
-
     let mut total = hull_force;
-    for f in container_forces.values() {
-        total.x += f.x;
-        total.y += f.y;
-    }
-
-    let (cos_a, sin_a) = (layout.flow_angle.cos(), layout.flow_angle.sin());
-    let total_drag = total.x * cos_a + total.y * sin_a;
-
-    // Couple global (objets connexes) — cf. note ci-dessus
-    let objects = grid.compute_object_forces();
-    let total_torque: f32 = objects.iter().map(|o| o.torque.abs()).sum();
-
+    for f in container_forces.values() { total.x += f.x; total.y += f.y; }
+    let total_drag = total.x * layout.flow_angle.cos() + total.y * layout.flow_angle.sin();
+    let total_torque: f32 = grid.compute_object_forces().iter().map(|o| o.torque.abs()).sum();
     let score = W_DRAG * total_drag.abs() + W_TORQUE * total_torque;
-
-    LayoutResult {
-        layout_name: layout.name.clone(),
-        hull_force,
-        container_forces,
-        total_drag,
-        total_torque,
-        score,
-    }
+    LayoutResult { layout_name: layout.name.clone(), hull_force, container_forces, total_drag, total_torque, score }
 }
 
-/// Lance plusieurs dispositions et affiche un classement par score
-/// (plus petit score = meilleur compromis traînée/couple).
 pub fn compare_layouts(layouts: &[ShipLayout], steps: usize, hole_pos: &[usize]) {
-    let mut results: Vec<LayoutResult> = layouts.iter()
-        .map(|l| test_layout(l, steps, hole_pos))
-        .collect();
-
-    results.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
-
+    let mut results: Vec<LayoutResult> = layouts.iter().map(|l| test_layout(l, steps, hole_pos)).collect();
+    results.sort_by(|a, b| a.score.total_cmp(&b.score));
     println!("\n=== Classement des dispositions de conteneurs ===");
     for r in &results {
-        println!(
-            "{:<20} | traînée: {:8.4} | couple total: {:8.4} | score: {:8.4}",
-            r.layout_name, r.total_drag, r.total_torque, r.score
-        );
+        println!("{:<20} | traînée: {:8.4} | couple total: {:8.4} | score: {:8.4}",
+            r.layout_name, r.total_drag, r.total_torque, r.score);
     }
     println!("===================================================\n");
 }
 
-// ============================================================================
-// GÉNÉRATEUR DE BATEAU PARAMÉTRABLE
-// ============================================================================
-
-/// Organisation des conteneurs sur le pont.
 #[derive(Clone, Copy, Debug)]
 pub enum ContainerLayoutKind {
-    /// Rangées x colonnes régulières.
     Grid { rows: usize, cols: usize },
-    /// Une rangée de `rows` niveaux, chaque niveau plus étroit que le précédent
-    /// (empilement en pyramide, base large en bas).
     Pyramid { rows: usize },
-    /// Rangées x colonnes, avec un décalage d'une demi-largeur une rangée sur deux.
     Staggered { rows: usize, cols: usize },
 }
 
-/// Paramètres géométriques pour générer rapidement un bateau + ses conteneurs.
 #[derive(Clone, Copy, Debug)]
 pub struct BoatParams {
-    /// Centre de la coque, en cellules de grille.
     pub center: (isize, isize),
     pub hull_width: f32,
     pub hull_height: f32,
     pub container_width: f32,
     pub container_height: f32,
-    /// Espace (en cellules) entre deux conteneurs adjacents et entre la coque
-    /// et le premier niveau de conteneurs.
     pub container_gap: f32,
     pub kind: ContainerLayoutKind,
     pub flow_angle: f32,
-
-    // --- Courbure de coque ---
     pub curve_bow: bool,
     pub curve_stern: bool,
-    /// 0.0 = pointu (triangulaire/clipper), 1.0 = arrondi (quart d'ellipse).
     pub hull_curvature: f32,
-    /// Longueur de la proue/poupe courbée, en cellules.
     pub bow_length: f32,
     pub stern_length: f32,
-
-    // --- Carénages aéro (gap-flow protectors) ---
     pub add_bow_fairing: bool,
     pub add_stern_fairing: bool,
-    pub fairing_length: f32,
+    pub bow_fairing_length: f32,
+    pub stern_fairing_length: f32,
+    pub bow_fairing_profile: FairingProfile,
+    pub stern_fairing_profile: FairingProfile,
+    pub bow_fairing_height_scale: f32,
+    pub stern_fairing_height_scale: f32,
+    /// 0 = au plus près de la proue, 1 = collé aux conteneurs.
+    pub bow_fairing_position: f32,
+    /// 0 = collé aux conteneurs, 1 = au plus près de la poupe.
+    pub stern_fairing_position: f32,
 }
 
-/// Construit une ShipLayout (coque rectangulaire + conteneurs empilés dessus)
-/// à partir de `BoatParams'. Les conteneurs sont empilés "vers le haut" (y
-/// décroissant) à partir du sommet de la coque.
 pub fn build_boat_layout(name: &str, p: &BoatParams) -> ShipLayout {
     let hull_rects = vec![(p.center, p.hull_width, p.hull_height)];
-
     let hull_curve = if p.curve_bow || p.curve_stern {
-        Some(HullCurveSpec {
-            curve_bow: p.curve_bow,
-            curve_stern: p.curve_stern,
-            curvature: p.hull_curvature,
-            bow_length: p.bow_length,
-            stern_length: p.stern_length,
-        })
-    } else {
-        None
-    };
-
+        Some(HullCurveSpec { curve_bow: p.curve_bow, curve_stern: p.curve_stern,
+            curvature: p.hull_curvature, bow_length: p.bow_length, stern_length: p.stern_length })
+    } else { None };
     let mut containers = Vec::new();
     let mut id = 0usize;
-
-    let top_of_hull_y = p.center.1 - (p.hull_height / 2.0) as isize;
+    let top = p.center.1 - (p.hull_height / 2.0) as isize;
     let step_x = p.container_width + p.container_gap;
     let step_y = p.container_height + p.container_gap;
-
-    let mut push_row = |row: usize, cols_in_row: usize, x_offset: f32, containers: &mut Vec<Container>, id: &mut usize| {
-        let total_w = cols_in_row as f32 * step_x - p.container_gap;
-        let start_x = p.center.0 - (total_w / 2.0) as isize + x_offset as isize;
-        let cy = top_of_hull_y - (row as f32 * step_y) as isize - (p.container_height / 2.0) as isize - p.container_gap as isize;
-
-        for c in 0..cols_in_row {
-            let cx = start_x + (c as f32 * step_x + p.container_width / 2.0) as isize;
-            containers.push(Container {
-                id: *id,
-                center: (cx, cy),
-                width: p.container_width,
-                height: p.container_height,
-            });
+    let push_row = |row: usize, ncols: usize, offset: f32, containers: &mut Vec<Container>, id: &mut usize| {
+        let total = ncols as f32 * step_x - p.container_gap;
+        let start = p.center.0 - (total / 2.0) as isize + offset as isize;
+        let cy = top - (p.container_height / 2.0) as isize
+            - (row as f32 * (p.container_height + p.container_gap)) as isize;
+        for c in 0..ncols {
+            containers.push(Container { id: *id,
+                center: (start + (c as f32 * step_x + p.container_width / 2.0) as isize, cy),
+                width: p.container_width, height: p.container_height });
             *id += 1;
         }
     };
-
     match p.kind {
         ContainerLayoutKind::Grid { rows, cols } => {
-            for r in 0..rows {
-                push_row(r, cols, 0.0, &mut containers, &mut id);
-            }
+            for r in 0..rows { push_row(r, cols, 0.0, &mut containers, &mut id); }
         }
         ContainerLayoutKind::Pyramid { rows } => {
-            for r in 0..rows {
-                let cols_in_row = rows.saturating_sub(r).max(1);
-                push_row(r, cols_in_row, 0.0, &mut containers, &mut id);
-            }
+            for r in 0..rows { push_row(r, rows.saturating_sub(r).max(1), 0.0, &mut containers, &mut id); }
         }
         ContainerLayoutKind::Staggered { rows, cols } => {
             for r in 0..rows {
-                let offset = if r % 2 == 1 { step_x / 2.0 } else { 0.0 };
-                push_row(r, cols, offset, &mut containers, &mut id);
+                push_row(r, cols, if r % 2 == 1 { step_x / 2.0 } else { 0.0 }, &mut containers, &mut id);
             }
         }
     }
-
-    // Carénages aéro devant/derrière la pile de conteneurs, dimensionnés sur
-    // l'emprise réelle (bounding box) des conteneurs générés.
     let mut fairings = Vec::new();
     if !containers.is_empty() && (p.add_bow_fairing || p.add_stern_fairing) {
-        let min_x = containers.iter().map(|c| c.center.0 - (c.width / 2.0) as isize).min().unwrap();
-        let max_x = containers.iter().map(|c| c.center.0 + (c.width / 2.0) as isize).max().unwrap();
-        let min_y = containers.iter().map(|c| c.center.1 - (c.height / 2.0) as isize).min().unwrap();
-        let max_y = containers.iter().map(|c| c.center.1 + (c.height / 2.0) as isize).max().unwrap();
-        let stack_half_h = ((max_y - min_y) as f32 / 2.0).max(1.0);
-        let stack_cy = (min_y + max_y) / 2;
+        let stack_left = containers.iter().map(|c| c.center.0 - (c.width / 2.0) as isize).min().unwrap();
+        let stack_right = containers.iter().map(|c| c.center.0 + (c.width / 2.0) as isize).max().unwrap();
+        let stack_top = containers.iter().map(|c| c.center.1 - (c.height / 2.0) as isize).min().unwrap();
+        let deck_y = top;
+        let fairing_h = ((deck_y - stack_top) as f32).max(4.0);
+        let main_left = p.center.0 - (p.hull_width / 2.0) as isize;
+        let main_right = p.center.0 + (p.hull_width / 2.0) as isize;
+        let bow_tip = if p.curve_bow { main_left - p.bow_length as isize } else { main_left };
+        let stern_tip = if p.curve_stern { main_right + p.stern_length as isize } else { main_right };
 
         if p.add_bow_fairing {
+            let max_len = ((stack_left - bow_tip - 2).max(2)) as f32;
+            let len = p.bow_fairing_length.clamp(2.0, max_len);
+            let start_min = bow_tip + 1;
+            let start_max = stack_left - len as isize;
+            let start = if start_max <= start_min { start_min } else {
+                let t = p.bow_fairing_position.clamp(0.0, 1.0);
+                (start_min as f32 + (start_max - start_min) as f32 * t).round() as isize
+            };
             fairings.push(Fairing {
-                position: (min_x, stack_cy),
-                length: p.fairing_length,
-                half_height: stack_half_h,
-                side: FairingSide::Bow,
+                position: (start, deck_y), length: len,
+                half_height: fairing_h, side: FairingSide::Bow,
+                profile: p.bow_fairing_profile,
+                height_scale: p.bow_fairing_height_scale,
             });
         }
         if p.add_stern_fairing {
+            let max_len = ((stern_tip - stack_right - 2).max(2)) as f32;
+            let len = p.stern_fairing_length.clamp(2.0, max_len);
+            let start_min = stack_right + 1;
+            let start_max = stern_tip - len as isize;
+            let start = if start_max <= start_min { start_min } else {
+                let t = p.stern_fairing_position.clamp(0.0, 1.0);
+                (start_min as f32 + (start_max - start_min) as f32 * t).round() as isize
+            };
             fairings.push(Fairing {
-                position: (max_x, stack_cy),
-                length: p.fairing_length,
-                half_height: stack_half_h,
-                side: FairingSide::Stern,
+                position: (start, deck_y), length: len,
+                half_height: fairing_h, side: FairingSide::Stern,
+                profile: p.stern_fairing_profile,
+                height_scale: p.stern_fairing_height_scale,
             });
         }
     }
-
-    ShipLayout {
-        name: name.to_string(),
-        hull_rects,
-        hull_curve,
-        containers,
-        fairings,
-        flow_angle: p.flow_angle,
-    }
+    ShipLayout { name: name.to_string(), hull_rects, hull_curve, containers, fairings, flow_angle: p.flow_angle }
 }
 
-/// Génère 3 variantes courantes (grille / pyramide / quinconce) à partir des
-/// mêmes dimensions de base, prêtes à passer à `compare_layouts`.
 pub fn quick_variants(base: BoatParams) -> Vec<ShipLayout> {
     vec![
         build_boat_layout("grille_3x3", &BoatParams { kind: ContainerLayoutKind::Grid { rows: 3, cols: 3 }, ..base }),
@@ -484,19 +552,6 @@ pub fn quick_variants(base: BoatParams) -> Vec<ShipLayout> {
     ]
 }
 
-// ============================================================================
-// CONFIGURATIONS ALÉATOIRES (exploration de l'espace des dispositions)
-// ============================================================================
-//
-// Inspiré de la démarche du papier joint (étude de l'effet de la disposition
-// des conteneurs et des carénages d'étrave/forecastle sur la traînée
-// aérodynamique) : plutôt que de comparer seulement quelques dispositions
-// choisies à la main, on tire aléatoirement rows/cols/gap/organisation/
-// courbure de coque/carénages pour explorer plus largement l'espace des
-// configurations, puis on les classe avec `compare_layouts`.
-
-/// Tire une unique disposition aléatoire de conteneurs (+ coque/carénages),
-/// en gardant les dimensions de base (`base`) de la coque et des conteneurs.
 pub fn random_layout(name: &str, base: &BoatParams, rng: &mut impl Rng) -> ShipLayout {
     let rows = rng.random_range(1..=6usize);
     let cols = rng.random_range(1..=6usize);
@@ -505,35 +560,37 @@ pub fn random_layout(name: &str, base: &BoatParams, rng: &mut impl Rng) -> ShipL
         1 => ContainerLayoutKind::Pyramid { rows },
         _ => ContainerLayoutKind::Staggered { rows, cols },
     };
-
-    let gap = rng.random_range(0.0..=(base.container_gap.max(1.0) * 3.0));
-    let curve_bow = rng.random_bool(0.6);
-    let curve_stern = rng.random_bool(0.6);
-    let curvature = rng.random_range(0.0..=1.0f32);
-    let add_bow_fairing = rng.random_bool(0.5);
-    let add_stern_fairing = rng.random_bool(0.5);
-    let fairing_length = rng.random_range(2.0..=(base.hull_width.max(4.0) * 0.5));
-
+    let profiles = [
+        FairingProfile::Triangular,
+        FairingProfile::Rounded,
+        FairingProfile::Parabolic,
+        FairingProfile::Stepped,
+        FairingProfile::TopCover,
+        FairingProfile::Sail,
+        FairingProfile::Arc,
+    ];
     let params = BoatParams {
         kind,
-        container_gap: gap,
-        curve_bow,
-        curve_stern,
-        hull_curvature: curvature,
-        add_bow_fairing,
-        add_stern_fairing,
-        fairing_length,
+        container_gap: rng.random_range(0.0..=(base.container_gap.max(1.0) * 3.0)),
+        curve_bow: rng.random_bool(0.6),
+        curve_stern: rng.random_bool(0.6),
+        hull_curvature: rng.random_range(0.0..=1.0f32),
+        add_bow_fairing: rng.random_bool(0.5),
+        add_stern_fairing: rng.random_bool(0.5),
+        bow_fairing_length: rng.random_range(2.0..=(base.hull_width.max(4.0) * 0.25)),
+        stern_fairing_length: rng.random_range(2.0..=(base.hull_width.max(4.0) * 0.25)),
+        bow_fairing_profile: profiles[rng.random_range(0..profiles.len())],
+        stern_fairing_profile: profiles[rng.random_range(0..profiles.len())],
+        bow_fairing_height_scale: rng.random_range(0.5..=1.6),
+        stern_fairing_height_scale: rng.random_range(0.5..=1.6),
+        bow_fairing_position: rng.random_range(0.0..=1.0),
+        stern_fairing_position: rng.random_range(0.0..=1.0),
         ..*base
     };
-
     build_boat_layout(name, &params)
 }
 
-/// Génère `n` configurations aléatoires prêtes à être comparées via
-/// `compare_layouts`.
 pub fn random_variants(base: BoatParams, n: usize) -> Vec<ShipLayout> {
     let mut rng = rand::rng();
-    (0..n)
-        .map(|i| random_layout(&format!("alea_{i}"), &base, &mut rng))
-        .collect()
+    (0..n).map(|i| random_layout(&format!("alea_{i}"), &base, &mut rng)).collect()
 }

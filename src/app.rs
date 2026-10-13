@@ -1,6 +1,6 @@
 use crate::conditions::*;
 use crate::grid::{Grid, ObjectForce};
-use crate::ship::{build_boat_layout, random_layout, BoatParams, ContainerLayoutKind};
+use crate::ship::{build_boat_layout, random_layout, BoatParams, ContainerLayoutKind, FairingProfile, SideProfileSettings, WallKind};
 use egui::Context;
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use pixels::{Pixels, SurfaceTexture};
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::event::{Event, WindowEvent};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::event_loop::{EventLoop};
 use winit::window::WindowBuilder;
 
@@ -34,6 +35,12 @@ enum ShapeKind {
     Square,
     Rectangle,
     Circle,
+}
+
+#[derive(Clone, Copy)]
+struct WaterlineOverlay {
+    y_center: f32,
+    thickness: usize,
 }
 
 /// Configuration de flux/scénario appliquée lors d'un redémarrage, et
@@ -194,13 +201,21 @@ struct BoatUiState {
     curve_bow: bool,
     curve_stern: bool,
     hull_curvature: f32,
+    side_profile: SideProfileSettings,
     bow_length: f32,
     stern_length: f32,
 
     // Carénages aéro
     add_bow_fairing: bool,
     add_stern_fairing: bool,
-    fairing_length: f32,
+    bow_fairing_length: f32,
+    stern_fairing_length: f32,
+    bow_fairing_height_scale: f32,
+    stern_fairing_height_scale: f32,
+    bow_fairing_position: f32,
+    stern_fairing_position: f32,
+    bow_fairing_kind_index: usize,
+    stern_fairing_kind_index: usize,
 
     // Nombre de configurations aléatoires à comparer (console uniquement)
     random_batch_size: usize,
@@ -209,23 +224,110 @@ struct BoatUiState {
 impl Default for BoatUiState {
     fn default() -> Self {
         Self {
-            hull_width: 30.0,
-            hull_height: 60.0,
-            container_width: 8.0,
+            hull_width: 120.0,
+            hull_height: 30.0,
+            container_width: 10.0,
             container_height: 8.0,
-            container_gap: 1.0,
+            container_gap: 3.0,
             kind_index: 0,
-            rows: 3,
-            cols: 3,
+            rows: 4,
+            cols: 7,
             curve_bow: true,
-            curve_stern: false,
+            curve_stern: true,
             hull_curvature: 0.6,
-            bow_length: 15.0,
-            stern_length: 15.0,
+            side_profile: SideProfileSettings {
+                freeboard_ratio: 0.36,
+                waterline_thickness: 3,
+                bow_rake: 0.74,
+                forecastle_rise: 0.16,
+                forecastle_length_ratio: 0.55,
+                bow_exponent: 1.55,
+                stern_rake: 0.30,
+                stern_exponent: 1.55,
+            },
+            bow_length: 30.0,
+            stern_length: 18.0,
             add_bow_fairing: false,
             add_stern_fairing: false,
-            fairing_length: 10.0,
+            bow_fairing_length: 12.0,
+            stern_fairing_length: 10.0,
+            bow_fairing_height_scale: 0.9,
+            stern_fairing_height_scale: 0.9,
+            bow_fairing_position: 0.55,
+            stern_fairing_position: 0.0,
+            bow_fairing_kind_index: 5,
+            stern_fairing_kind_index: 0,
             random_batch_size: 8,
+        }
+    }
+}
+
+struct BoatVisualUiState {
+    colorize_ship_parts: bool,
+    highlight_waterline: bool,
+    waterline_color: egui::Color32,
+    container_color: egui::Color32,
+    bow_hull_color: egui::Color32,
+    stern_hull_color: egui::Color32,
+    bow_fairing_color: egui::Color32,
+    stern_fairing_color: egui::Color32,
+}
+
+impl Default for BoatVisualUiState {
+    fn default() -> Self {
+        Self {
+            colorize_ship_parts: true,
+            highlight_waterline: true,
+            waterline_color: egui::Color32::from_rgb(0, 180, 255),
+            container_color: egui::Color32::from_rgb(210, 120, 20),
+            bow_hull_color: egui::Color32::from_rgb(90, 90, 150),
+            stern_hull_color: egui::Color32::from_rgb(60, 140, 150),
+            bow_fairing_color: egui::Color32::from_rgb(165, 80, 200),
+            stern_fairing_color: egui::Color32::from_rgb(70, 180, 95),
+        }
+    }
+}
+
+fn color32_to_rgba(color: egui::Color32) -> [u8; 4] {
+    [color.r(), color.g(), color.b(), color.a()]
+}
+
+fn boat_waterline_overlay(boat_ui: &BoatUiState) -> WaterlineOverlay {
+    WaterlineOverlay {
+        y_center: (N as f32 / 2.0 - boat_ui.hull_height / 2.0)
+            + boat_ui.hull_height * boat_ui.side_profile.freeboard_ratio,
+        thickness: boat_ui.side_profile.waterline_thickness,
+    }
+}
+
+fn tunnel_hole_positions_for_waterline(waterline: WaterlineOverlay) -> Vec<usize> {
+    let half = (waterline.thickness as isize) / 2;
+    let band_start = (waterline.y_center.round() as isize - half).clamp(2, N as isize - 1) as usize;
+    let holes: Vec<usize> = (1..=N as usize)
+        .filter(|&j| j % FLOW_SPACE == 0 && j < band_start)
+        .collect();
+    if holes.is_empty() {
+        (1..=N as usize).filter(|&j| j % FLOW_SPACE == 0).collect()
+    } else {
+        holes
+    }
+}
+
+fn inject_wind_above_waterline(grid: &mut Grid, density: f32, flow_velocity: f32, waterline: WaterlineOverlay) {
+    let left_wall = 1;
+    let box_width = (N as usize / 30).max(2);
+    let right_wall = left_wall + box_width;
+    let half = (waterline.thickness as isize) / 2;
+    let band_start = (waterline.y_center.round() as isize - half).clamp(2, N as isize - 1) as usize;
+
+    for i in (left_wall + 2)..=right_wall.saturating_sub(5) {
+        for j in 2..band_start {
+            let idx = grid.to_index(i, j);
+            if grid.cells[idx].wall {
+                continue;
+            }
+            let wf = wind_profile_factor(j);
+            grid.cell_init(i, j, flow_velocity * wf, 0.0, density);
         }
     }
 }
@@ -240,6 +342,23 @@ fn density_color(density: f32) -> [u8; 4] {
         let red = (255.0 * (excess / 20.0)).clamp(0.0, 255.0) as u8;
         [red, 0x00, 0x00, 0xFF]
     }
+}
+
+
+fn fairing_profile_from_index(i: usize) -> FairingProfile {
+    match i {
+        0 => FairingProfile::Triangular,
+        1 => FairingProfile::Rounded,
+        2 => FairingProfile::Parabolic,
+        3 => FairingProfile::Stepped,
+        4 => FairingProfile::TopCover,
+        5 => FairingProfile::Sail,
+        _ => FairingProfile::Arc,
+    }
+}
+
+fn fairing_profile_name(i: usize) -> &'static str {
+    fairing_profile_from_index(i).label()
 }
 
 /// Colormap divergente bleu -> blanc -> rouge, pour des champs pouvant être
@@ -317,7 +436,7 @@ fn vorticity_at(grid: &Grid, i: usize, j: usize) -> f32 {
 /// ne recopiait jamais le champ de pression résolu dans `cell.pressure`
 /// (voir le correctif dans grid.rs) — `cell.pressure` restait donc toujours
 /// à 0.0 et `max_abs` valait toujours ~1e-6, écrasant tout en blanc.
-fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode, vorticity_gain: f32, pressure_gain: f32) {
+fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode, vorticity_gain: f32, pressure_gain: f32, wall_labels: Option<&HashMap<usize, WallKind>>, visuals: &BoatVisualUiState) {
     let n_max = N as usize + 1;
 
     let mut max_abs: f32 = 1e-6;
@@ -351,7 +470,19 @@ fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode, vo
             let idx = grid.to_index(i, j);
             let px = (j * grid_w + i) * 4;
             let color = if grid.cells[idx].wall {
-                [0, 0, 0, 255]
+                if let Some(labels) = wall_labels {
+                    match labels.get(&idx) {
+                        Some(WallKind::Water) if visuals.highlight_waterline => color32_to_rgba(visuals.waterline_color),
+                        Some(WallKind::Container(_)) if visuals.colorize_ship_parts => color32_to_rgba(visuals.container_color),
+                        Some(WallKind::BowHull) if visuals.colorize_ship_parts => color32_to_rgba(visuals.bow_hull_color),
+                        Some(WallKind::SternHull) if visuals.colorize_ship_parts => color32_to_rgba(visuals.stern_hull_color),
+                        Some(WallKind::BowFairing) if visuals.colorize_ship_parts => color32_to_rgba(visuals.bow_fairing_color),
+                        Some(WallKind::SternFairing) if visuals.colorize_ship_parts => color32_to_rgba(visuals.stern_fairing_color),
+                        _ => [0, 0, 0, 255],
+                    }
+                } else {
+                    [0, 0, 0, 255]
+                }
             } else {
                 match mode {
                     DisplayMode::Density => density_color(grid.cells[idx].density),
@@ -382,6 +513,39 @@ fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode, vo
             frame[px..px + 4].copy_from_slice(&color);
         }
     }
+}
+
+/// Hélice purement graphique, dessinée sous l'eau près de la poupe.
+/// Elle n'ajoute pas de murs au solveur aérodynamique.
+fn draw_propeller(frame: &mut [u8], grid_w: usize, boat: &BoatUiState) {
+    if !boat.curve_stern { return; }
+    let deck = N as f32 / 2.0 - boat.hull_height / 2.0;
+    let waterline = deck + boat.hull_height * boat.side_profile.freeboard_ratio;
+    let draft = boat.hull_height * (1.0 - boat.side_profile.freeboard_ratio);
+    let right = N / 2.0 + boat.hull_width / 2.0;
+    let cx = (right + boat.stern_length * 0.42).round() as isize;
+    let cy = (waterline + draft * 0.38).round() as isize;
+    let radius = (draft * 0.13).clamp(2.0, 4.0) as isize;
+    let mut paint = |x: isize, y: isize, color: [u8; 4]| {
+        if x >= 1 && x <= N as isize && y >= 1 && y <= N as isize {
+            let p = (y as usize * grid_w + x as usize) * 4;
+            if p + 4 <= frame.len() { frame[p..p + 4].copy_from_slice(&color); }
+        }
+    };
+    let shaft = [52, 58, 70, 255];
+    let blade = [210, 215, 225, 255];
+    for x in (cx - radius - 3)..=cx { paint(x, cy, shaft); }
+    for k in -radius..=radius {
+        paint(cx, cy + k, blade);
+        paint(cx + k, cy, blade);
+    }
+    for k in -radius..=radius {
+        if k.abs() <= radius / 2 {
+            paint(cx + k, cy + k, blade);
+            paint(cx + k, cy - k, blade);
+        }
+    }
+    paint(cx, cy, shaft);
 }
 
 /// Tamponne un mur de taille `pen_size` (diamètre approx.) centré sur (cx, cy).
@@ -420,29 +584,29 @@ fn apply_shape(grid: &mut Grid, shape: ShapeKind, size: f32) {
 /// (Ré)initialise une grille selon la configuration choisie (murs fixes
 /// posés une seule fois ici ; l'injection continue est gérée à chaque frame
 /// dans la boucle principale, voir `inject_for_config`).
-fn setup_config(grid: &mut Grid, config: ConfigKind, hole_pos: &[usize]) {
+fn setup_config(grid: &mut Grid, config: ConfigKind, hole_pos: &[usize], water_level: f32) {
     match config {
         ConfigKind::ClassicFlow => {
             grid.setup_wind_tunnel_walls(hole_pos);
-            grid.init_water(WATER_LEVEL);
+            grid.init_water(water_level);
         }
         ConfigKind::CenterSource => {
             // Pas de murs fixes : seule l'injection au centre est nécessaire.
-            grid.init_water(WATER_LEVEL);
+            grid.init_water(water_level);
         }
         ConfigKind::KarmanVortex => {
             grid.setup_karman_vortex();
-            grid.init_water(WATER_LEVEL);
+            grid.init_water(water_level);
         }
     }
 }
 
 /// Injection continue (densité/vitesse) répétée à chaque frame, selon la
 /// configuration active.
-fn inject_for_config(grid: &mut Grid, config: ConfigKind, params: &SimParams, scenario: &ScenarioUiState) {
+fn inject_for_config(grid: &mut Grid, config: ConfigKind, params: &SimParams, scenario: &ScenarioUiState, waterline: WaterlineOverlay) {
     match config {
         ConfigKind::ClassicFlow => {
-            grid.inject_wind_tunnel_flow(params.flow_density, params.flow_velocity);
+            inject_wind_above_waterline(grid, params.flow_density, params.flow_velocity, waterline);
         }
         ConfigKind::CenterSource => {
             grid.center_source(
@@ -493,6 +657,8 @@ pub fn run_app(mut grid: Grid) -> ! {
     let mut tick_history = TickHistory::new(300);
     let mut last_tick_ms: f64 = 0.0;
     let mut boat_ui = BoatUiState::default();
+    let mut boat_visuals = BoatVisualUiState::default();
+    let mut boat_labels: HashMap<usize, WallKind> = HashMap::new();
     let mut scenario = ScenarioUiState::default();
     let mut step: usize = 0;
     let start = Instant::now();
@@ -503,11 +669,15 @@ pub fn run_app(mut grid: Grid) -> ! {
     let mut line_anchor: Option<(usize, usize)> = None;   // pour le mode "ligne droite"
     let mut last_cursor_pixel: Option<(usize, usize)> = None; // dernière position connue (grille)
 
-    let hole_pos: Vec<usize> = (1..=N as usize).filter(|&x| x % FLOW_SPACE == 0).collect();
+    let initial_waterline = boat_waterline_overlay(&boat_ui);
+    let mut active_waterline = initial_waterline;
+    let hole_pos = tunnel_hole_positions_for_waterline(initial_waterline);
 
     // Configuration initiale (par défaut : tunnel de vent classique), murs
     // fixes posés une seule fois ici.
-    setup_config(&mut grid, scenario.config, &hole_pos);
+    setup_config(&mut grid, scenario.config, &hole_pos, initial_waterline.y_center);
+
+    let mut keyboard_apply_boat = false;
 
     event_loop.run(move |event, elwt| {
         match event {
@@ -515,6 +685,21 @@ pub fn run_app(mut grid: Grid) -> ! {
                 let response = egui_winit.on_window_event(&window, &event);
                 if response.consumed {
                     // egui a géré l'événement (clic sur un slider, etc.)
+                } else if let WindowEvent::KeyboardInput { event: key, .. } = event {
+                    if key.state == winit::event::ElementState::Pressed && !key.repeat {
+                        if let PhysicalKey::Code(code) = key.physical_key {
+                            match code {
+                                KeyCode::Space => params.paused = !params.paused,
+                                KeyCode::KeyR => keyboard_apply_boat = true,
+                                KeyCode::Digit1 => params.display_mode = DisplayMode::Density,
+                                KeyCode::Digit2 => params.display_mode = DisplayMode::Vorticity,
+                                KeyCode::Digit3 => params.display_mode = DisplayMode::Pressure,
+                                KeyCode::Digit4 => params.display_mode = DisplayMode::Velocity,
+                                KeyCode::Digit5 => params.display_mode = DisplayMode::Phase,
+                                _ => {}
+                            }
+                        }
+                    }
                 } else if let WindowEvent::CloseRequested = event {
                     elwt.exit();
                 } else if let WindowEvent::Resized(new_size) = event {
@@ -575,7 +760,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     //        que "Step" / "Appliquer bateau" / "Redémarrer" / "Quitter"
                     //        agissent dès cette frame) ---
                     let mut do_step = false;
-                    let mut apply_boat = false;
+                    let mut apply_boat = std::mem::take(&mut keyboard_apply_boat);
                     let mut apply_random_boat = false;
                     let mut do_restart = false;
 
@@ -583,33 +768,35 @@ pub fn run_app(mut grid: Grid) -> ! {
                     let full_output = egui_ctx.run(raw_input, |ctx| {
                         egui::SidePanel::right("controls").show(ctx, |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
-                                ui.heading("Paramètres");
-                                ui.add(egui::Slider::new(&mut params.flow_velocity, 0.0..=10.0).text("Vitesse flux"));
-                                ui.add(egui::Slider::new(&mut params.flow_density, 0.0..=50.0).text("Densité flux"));
-                                ui.add(egui::Slider::new(&mut params.viscosity, 0.0..=0.01).text("Viscosité"));
-                                ui.separator();
-                                ui.add(egui::Slider::new(&mut params.w_drag, 0.0..=5.0).text("Poids traînée"));
-                                ui.add(egui::Slider::new(&mut params.w_torque, 0.0..=5.0).text("Poids couple"));
-
-                                ui.separator();
-                                ui.label("Champ affiché");
-                                ui.radio_value(&mut params.display_mode, DisplayMode::Density, "Densité");
-                                ui.radio_value(&mut params.display_mode, DisplayMode::Vorticity, "Vorticité (gradient)");
-                                ui.radio_value(&mut params.display_mode, DisplayMode::Pressure, "Pression (gradient)");
-                                ui.radio_value(&mut params.display_mode, DisplayMode::Velocity, "Vitesse (gradient)");
-                                ui.radio_value(&mut params.display_mode, DisplayMode::Phase, "Phase");
-                                if params.display_mode == DisplayMode::Vorticity {
-                                    ui.add(egui::Slider::new(&mut params.vorticity_gain, 0.5..=5.0).text("Contraste vorticité"));
-                                }
-                                if params.display_mode == DisplayMode::Pressure {
-                                    ui.add(egui::Slider::new(&mut params.pressure_gain, 0.5..=5.0).text("Contraste pression"));
-                                }
-
-                                ui.separator();
-                                ui.label("Dessin de murs");
-                                ui.add(egui::Slider::new(&mut params.pen_size, 1..=30).text("Taille du stylo"));
-                                ui.checkbox(&mut params.straight_line_mode, "Ligne droite (clic → relâcher)");
-
+                                ui.heading("Simulation de vent — vue de côté");
+                                ui.small("Raccourcis : Espace = pause · R = appliquer bateau · 1 à 5 = champs affichés");
+                                egui::CollapsingHeader::new("Paramètres physiques")
+                                    .default_open(false).show(ui, |ui| {
+                                        ui.add(egui::Slider::new(&mut params.flow_velocity, 0.0..=10.0).text("Vitesse du vent"));
+                                        ui.add(egui::Slider::new(&mut params.flow_density, 0.0..=50.0).text("Densité du flux"));
+                                        ui.add(egui::Slider::new(&mut params.viscosity, 0.0..=0.01).text("Viscosité (réglage)"));
+                                        ui.add(egui::Slider::new(&mut params.w_drag, 0.0..=5.0).text("Poids traînée"));
+                                        ui.add(egui::Slider::new(&mut params.w_torque, 0.0..=5.0).text("Poids couple"));
+                                    });
+                                egui::CollapsingHeader::new("Champ affiché")
+                                    .default_open(false).show(ui, |ui| {
+                                        ui.radio_value(&mut params.display_mode, DisplayMode::Density, "Densité");
+                                        ui.radio_value(&mut params.display_mode, DisplayMode::Vorticity, "Vorticité");
+                                        ui.radio_value(&mut params.display_mode, DisplayMode::Pressure, "Pression");
+                                        ui.radio_value(&mut params.display_mode, DisplayMode::Velocity, "Vitesse");
+                                        ui.radio_value(&mut params.display_mode, DisplayMode::Phase, "Phase");
+                                        if params.display_mode == DisplayMode::Vorticity {
+                                            ui.add(egui::Slider::new(&mut params.vorticity_gain, 0.5..=5.0).text("Contraste vorticité"));
+                                        }
+                                        if params.display_mode == DisplayMode::Pressure {
+                                            ui.add(egui::Slider::new(&mut params.pressure_gain, 0.5..=5.0).text("Contraste pression"));
+                                        }
+                                    });
+                                egui::CollapsingHeader::new("Dessin de murs")
+                                    .default_open(false).show(ui, |ui| {
+                                        ui.add(egui::Slider::new(&mut params.pen_size, 1..=30).text("Taille du stylo"));
+                                        ui.checkbox(&mut params.straight_line_mode, "Ligne droite (clic → relâcher)");
+                                    });
                                 ui.separator();
                                 if ui.button(if params.paused { "Reprendre" } else { "Pause" }).clicked() {
                                     params.paused = !params.paused;
@@ -684,57 +871,124 @@ pub fn run_app(mut grid: Grid) -> ! {
                                 });
 
                                 ui.separator();
-                                ui.collapsing("Générateur de bateau", |ui| {
-                                    ui.add(egui::Slider::new(&mut boat_ui.hull_width, 5.0..=(N * 0.9)).text("Largeur coque"));
-                                    ui.add(egui::Slider::new(&mut boat_ui.hull_height, 5.0..=(N * 0.9)).text("Hauteur coque"));
-                                    ui.add(egui::Slider::new(&mut boat_ui.container_width, 2.0..=100.0).text("Largeur conteneur"));
-                                    ui.add(egui::Slider::new(&mut boat_ui.container_height, 2.0..=100.0).text("Hauteur conteneur"));
-                                    ui.add(egui::Slider::new(&mut boat_ui.container_gap, 0.0..=40.0).text("Espacement"));
-
-                                    egui::ComboBox::from_label("Organisation")
-                                        .selected_text(match boat_ui.kind_index {
-                                            0 => "Grille",
-                                            1 => "Pyramide",
-                                            _ => "Quinconce",
-                                        })
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(&mut boat_ui.kind_index, 0, "Grille");
-                                            ui.selectable_value(&mut boat_ui.kind_index, 1, "Pyramide");
-                                            ui.selectable_value(&mut boat_ui.kind_index, 2, "Quinconce");
+                                egui::CollapsingHeader::new("Générateur de bateau")
+                                    .default_open(true).show(ui, |ui| {
+                                    egui::CollapsingHeader::new("Coque et ligne d'eau")
+                                        .default_open(true).show(ui, |ui| {
+                                        ui.add(egui::Slider::new(&mut boat_ui.hull_width, 5.0..=(N * 0.9)).text("Longueur corps central"));
+                                        ui.add(egui::Slider::new(&mut boat_ui.hull_height, 5.0..=(N * 0.9)).text("Hauteur coque"));
+                                        ui.add(egui::Slider::new(&mut boat_ui.side_profile.freeboard_ratio, 0.05..=0.95)
+                                            .text("Fraction émergée"));
+                                        ui.small("Sous la ligne d'eau : murs statiques, sans simulation de l'eau.");
+                                    });
+                                    egui::CollapsingHeader::new("Proue — profil émergé")
+                                        .default_open(true).show(ui, |ui| {
+                                        ui.checkbox(&mut boat_ui.curve_bow, "Activer la proue profilée");
+                                        ui.add_enabled_ui(boat_ui.curve_bow, |ui| {
+                                            ui.add(egui::Slider::new(&mut boat_ui.bow_length, 1.0..=(N * 0.3)).text("Longueur proue"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.side_profile.bow_rake, 0.0..=1.0)
+                                                .text("Inclinaison étrave"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.side_profile.bow_exponent, 0.2..=6.0)
+                                                .text("Exposant étrave"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.side_profile.forecastle_rise, 0.0..=0.8)
+                                                .text("Relèvement du gaillard"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.side_profile.forecastle_length_ratio, 0.01..=1.0)
+                                                .text("Longueur relative gaillard"));
                                         });
-
-                                    ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=25).text("Rangées"));
-                                    if boat_ui.kind_index != 1 {
-                                        ui.add(egui::Slider::new(&mut boat_ui.cols, 1..=25).text("Colonnes"));
-                                    }
-
-                                    ui.separator();
-                                    ui.label("Courbure de coque (proue / poupe)");
-                                    ui.checkbox(&mut boat_ui.curve_bow, "Proue courbée (avant)");
-                                    ui.checkbox(&mut boat_ui.curve_stern, "Poupe courbée (arrière)");
-                                    ui.add_enabled(
-                                        boat_ui.curve_bow || boat_ui.curve_stern,
-                                        egui::Slider::new(&mut boat_ui.hull_curvature, 0.0..=1.0)
-                                            .text("Courbure (0 = pointue, 1 = arrondie)"),
-                                    );
-                                    ui.add_enabled(
-                                        boat_ui.curve_bow,
-                                        egui::Slider::new(&mut boat_ui.bow_length, 1.0..=(N * 0.3)).text("Longueur proue"),
-                                    );
-                                    ui.add_enabled(
-                                        boat_ui.curve_stern,
-                                        egui::Slider::new(&mut boat_ui.stern_length, 1.0..=(N * 0.3)).text("Longueur poupe"),
-                                    );
-
-                                    ui.separator();
-                                    ui.label("Carénages aéro (gap-flow protectors)");
-                                    ui.checkbox(&mut boat_ui.add_bow_fairing, "Carénage avant les conteneurs");
-                                    ui.checkbox(&mut boat_ui.add_stern_fairing, "Carénage derrière les conteneurs");
-                                    ui.add_enabled(
-                                        boat_ui.add_bow_fairing || boat_ui.add_stern_fairing,
-                                        egui::Slider::new(&mut boat_ui.fairing_length, 1.0..=(N * 0.2)).text("Longueur carénage"),
-                                    );
-
+                                    });
+                                    egui::CollapsingHeader::new("Poupe — profil émergé")
+                                        .default_open(false).show(ui, |ui| {
+                                        ui.checkbox(&mut boat_ui.curve_stern, "Activer la poupe profilée");
+                                        ui.add_enabled_ui(boat_ui.curve_stern, |ui| {
+                                            ui.add(egui::Slider::new(&mut boat_ui.stern_length, 1.0..=(N * 0.3)).text("Longueur poupe"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.side_profile.stern_rake, 0.0..=1.0)
+                                                .text("Inclinaison poupe"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.side_profile.stern_exponent, 0.2..=6.0)
+                                                .text("Exposant poupe"));
+                                        });
+                                    });
+                                    egui::CollapsingHeader::new("Conteneurs")
+                                        .default_open(false).show(ui, |ui| {
+                                        ui.add(egui::Slider::new(&mut boat_ui.container_width, 2.0..=100.0).text("Largeur conteneur"));
+                                        ui.add(egui::Slider::new(&mut boat_ui.container_height, 2.0..=100.0).text("Hauteur conteneur"));
+                                        ui.add(egui::Slider::new(&mut boat_ui.container_gap, 0.0..=40.0).text("Espacement"));
+                                        egui::ComboBox::from_label("Organisation")
+                                            .selected_text(match boat_ui.kind_index { 0 => "Grille", 1 => "Pyramide", _ => "Quinconce" })
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut boat_ui.kind_index, 0, "Grille");
+                                                ui.selectable_value(&mut boat_ui.kind_index, 1, "Pyramide");
+                                                ui.selectable_value(&mut boat_ui.kind_index, 2, "Quinconce");
+                                            });
+                                        ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=25).text("Rangées"));
+                                        if boat_ui.kind_index != 1 {
+                                            ui.add(egui::Slider::new(&mut boat_ui.cols, 1..=25).text("Colonnes"));
+                                        }
+                                    });
+                                    egui::CollapsingHeader::new("Carénages aérodynamiques")
+                                        .default_open(false).show(ui, |ui| {
+                                        ui.checkbox(&mut boat_ui.add_bow_fairing, "Carénage avant");
+                                        ui.checkbox(&mut boat_ui.add_stern_fairing, "Carénage arrière");
+                                        ui.add_enabled_ui(boat_ui.add_bow_fairing, |ui| {
+                                            ui.label("Réglages carénage avant");
+                                            ui.add(egui::Slider::new(&mut boat_ui.bow_fairing_length, 2.0..=(N * 0.25)).text("Longueur"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.bow_fairing_height_scale, 0.2..=2.5).text("Hauteur relative"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.bow_fairing_position, 0.0..=1.0)
+                                                .text("Position (0=proue, 1=conteneurs)"));
+                                            egui::ComboBox::from_label("Profil carénage avant")
+                                                .selected_text(fairing_profile_name(boat_ui.bow_fairing_kind_index))
+                                                .show_ui(ui, |ui| {
+                                                    for idx in 0..7 {
+                                                        ui.selectable_value(&mut boat_ui.bow_fairing_kind_index, idx, fairing_profile_name(idx));
+                                                    }
+                                                });
+                                        });
+                                        ui.separator();
+                                        ui.add_enabled_ui(boat_ui.add_stern_fairing, |ui| {
+                                            ui.label("Réglages carénage arrière");
+                                            ui.add(egui::Slider::new(&mut boat_ui.stern_fairing_length, 2.0..=(N * 0.25)).text("Longueur"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.stern_fairing_height_scale, 0.2..=2.5).text("Hauteur relative"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.stern_fairing_position, 0.0..=1.0)
+                                                .text("Position (0=conteneurs, 1=poupe)"));
+                                            egui::ComboBox::from_label("Profil carénage arrière")
+                                                .selected_text(fairing_profile_name(boat_ui.stern_fairing_kind_index))
+                                                .show_ui(ui, |ui| {
+                                                    for idx in 0..7 {
+                                                        ui.selectable_value(&mut boat_ui.stern_fairing_kind_index, idx, fairing_profile_name(idx));
+                                                    }
+                                                });
+                                        });
+                                        ui.small("Profils disponibles : triangulaire, arrondi, parabolique, étagé, capot supérieur, voile/rampe et arc courbe.");
+                                    });
+                                    egui::CollapsingHeader::new("Couleurs / visualisation")
+                                        .default_open(false).show(ui, |ui| {
+                                        ui.checkbox(&mut boat_visuals.colorize_ship_parts, "Colorer conteneurs et carénages");
+                                        ui.checkbox(&mut boat_visuals.highlight_waterline, "Mettre en évidence la ligne d'eau");
+                                        ui.horizontal(|ui| {
+                                            ui.label("Conteneurs");
+                                            ui.color_edit_button_srgba(&mut boat_visuals.container_color);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Proue");
+                                            ui.color_edit_button_srgba(&mut boat_visuals.bow_hull_color);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Poupe");
+                                            ui.color_edit_button_srgba(&mut boat_visuals.stern_hull_color);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Carénage proue");
+                                            ui.color_edit_button_srgba(&mut boat_visuals.bow_fairing_color);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Carénage poupe");
+                                            ui.color_edit_button_srgba(&mut boat_visuals.stern_fairing_color);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Ligne d'eau");
+                                            ui.color_edit_button_srgba(&mut boat_visuals.waterline_color);
+                                        });
+                                        ui.small("Le corps principal de coque reste noir ; seules la proue, la poupe, les conteneurs et les carénages peuvent être colorés.");
+                                    });
                                     ui.separator();
                                     if ui.button("Appliquer configuration bateau").clicked() {
                                         apply_boat = true;
@@ -745,13 +999,12 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         }
                                         ui.add(egui::Slider::new(&mut boat_ui.random_batch_size, 2..=40).text("N (comparaison console)"));
                                     });
-                                    ui.label("« N » lance N configurations aléatoires en tâche de fond \
-                                              (headless) et affiche leur classement traînée/couple dans la console, \
-                                              à la façon de l'étude jointe sur les carénages d'étrave.");
+                                    ui.small("Les nouveaux réglages prennent effet à l'application du bateau.");
                                 });
 
                                 ui.separator();
-                                ui.label("Traînée / Couple par objet détecté");
+                                egui::CollapsingHeader::new("Traînée / Couple par objet détecté")
+                                    .default_open(false).show(ui, |ui| {
                                 ui.add(egui::Slider::new(&mut params.min_cells_to_plot, 0..=500).text("Taille mini (cellules)"));
                                 ui.add(egui::Slider::new(&mut params.min_column_x, 0.0..=N).text("Colonne mini (x)"));
                                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
@@ -786,15 +1039,19 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         }
                                     }
                                 });
+                                }); // fin section traînée/couple
                             });
                         });
                     });
 
                     // --- 2. Redémarrage "scénario" (forme + configuration de flux) ---
                     if do_restart {
+                        active_waterline = boat_waterline_overlay(&boat_ui);
+                        let hole_pos = tunnel_hole_positions_for_waterline(active_waterline);
                         grid = Grid::new();
+                        boat_labels.clear();
                         apply_shape(&mut grid, scenario.shape, scenario.shape_size);
-                        setup_config(&mut grid, scenario.config, &hole_pos);
+                        setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
                         history.clear();
                         step = 0;
                     }
@@ -822,18 +1079,27 @@ pub fn run_app(mut grid: Grid) -> ! {
                             stern_length: boat_ui.stern_length,
                             add_bow_fairing: boat_ui.add_bow_fairing,
                             add_stern_fairing: boat_ui.add_stern_fairing,
-                            fairing_length: boat_ui.fairing_length,
+                            bow_fairing_length: boat_ui.bow_fairing_length,
+                            stern_fairing_length: boat_ui.stern_fairing_length,
+                            bow_fairing_profile: fairing_profile_from_index(boat_ui.bow_fairing_kind_index),
+                            stern_fairing_profile: fairing_profile_from_index(boat_ui.stern_fairing_kind_index),
+                            bow_fairing_height_scale: boat_ui.bow_fairing_height_scale,
+                            stern_fairing_height_scale: boat_ui.stern_fairing_height_scale,
+                            bow_fairing_position: boat_ui.bow_fairing_position,
+                            stern_fairing_position: boat_ui.stern_fairing_position,
                         }
                     };
 
                     if apply_boat {
                         let boat_params = boat_params_from_ui(&boat_ui);
                         let layout = build_boat_layout("custom", &boat_params);
+                        active_waterline = boat_waterline_overlay(&boat_ui);
+                        let hole_pos = tunnel_hole_positions_for_waterline(active_waterline);
                         grid = Grid::new();
-                        grid.apply_layout(&layout);
+                        boat_labels = grid.apply_layout_with_profile(&layout, &boat_ui.side_profile);
                         // La grille vient d'être recréée : il faut reposer les
                         // murs de la configuration active une fois.
-                        setup_config(&mut grid, scenario.config, &hole_pos);
+                        setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
                         history.clear();
                         step = 0;
                     }
@@ -842,9 +1108,11 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let base_params = boat_params_from_ui(&boat_ui);
                         let mut rng = rand::rng();
                         let layout = random_layout("alea_apercu", &base_params, &mut rng);
+                        active_waterline = boat_waterline_overlay(&boat_ui);
+                        let hole_pos = tunnel_hole_positions_for_waterline(active_waterline);
                         grid = Grid::new();
-                        grid.apply_layout(&layout);
-                        setup_config(&mut grid, scenario.config, &hole_pos);
+                        boat_labels = grid.apply_layout_with_profile(&layout, &boat_ui.side_profile);
+                        setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
                         history.clear();
                         step = 0;
 
@@ -862,7 +1130,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     if !params.paused || do_step {
                         let tick_start = Instant::now();
 
-                        inject_for_config(&mut grid, scenario.config, &params, &scenario);
+                        inject_for_config(&mut grid, scenario.config, &params, &scenario, active_waterline);
                         grid.vel2_step(params.flow_velocity);
                         step += 1;
 
@@ -875,7 +1143,19 @@ pub fn run_app(mut grid: Grid) -> ! {
                     }
 
                     // --- 5. Rendu grille dans le buffer pixels ---
-                    draw_grid(&grid, pixels.frame_mut(), grid_w, params.display_mode, params.vorticity_gain, params.pressure_gain);
+                    draw_grid(
+                        &grid,
+                        pixels.frame_mut(),
+                        grid_w,
+                        params.display_mode,
+                        params.vorticity_gain,
+                        params.pressure_gain,
+                        Some(&boat_labels),
+                        &boat_visuals,
+                    );
+                    if !boat_labels.is_empty() {
+                        draw_propeller(pixels.frame_mut(), grid_w, &boat_ui);
+                    }
 
                     // --- 6. Finalisation UI ---
                     egui_winit.handle_platform_output(&window, full_output.platform_output);
