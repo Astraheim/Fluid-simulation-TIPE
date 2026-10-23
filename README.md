@@ -32,7 +32,6 @@
   <img src="assets/Capture%20d%27%C3%A9cran%202026-10-13%20153646.png" width="48%" alt="Simulation capture, October 2026">
   <img src="assets/Capture%20d%27%C3%A9cran%202026-10-13%20153653.png" width="48%" alt="Simulation capture, October 2026">
   <img src="assets/Capture%20d%27%C3%A9cran%202026-10-13%20154043.png" width="48%" alt="Simulation capture, October 2026">
-  <p><em>Recent screenshots available in the repository's assets directory.</em></p>
 </div>
 
 > This is an evolving educational/research project. Images illustrate numerical experiments, not validated industrial CFD results.
