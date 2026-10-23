@@ -1,449 +1,296 @@
 # 🌊 Fluid Simulation — TIPE
 
-<p align="center">
-  <strong>Numerical simulation of fluid flows for the study and optimisation of wind-assisted ship propulsion</strong>
-</p>
+<div align="center">
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Language-Rust-orange?style=for-the-badge&logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/TIPE-2026-blue?style=for-the-badge" alt="TIPE 2026">
-  <img src="https://img.shields.io/badge/Simulation-Fluid%20Dynamics-8A2BE2?style=for-the-badge" alt="Fluid Dynamics">
-</p>
+**A Rust-based 2D fluid simulator for investigating airflow, cargo-ship aerodynamics and wind-assisted shipping.**
 
----
+![Rust](https://img.shields.io/badge/Language-Rust-CE422B?style=for-the-badge&logo=rust&logoColor=white)
+![Project](https://img.shields.io/badge/Project-TIPE%202026-2563EB?style=for-the-badge)
+![Field](https://img.shields.io/badge/Field-Computational%20Fluid%20Dynamics-0D9488?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Research%20prototype-F59E0B?style=for-the-badge)
 
-## 🖥️ Simulation
+**[Overview](#-project-overview) · [Ship aerodynamics](#-from-fluid-flow-to-cargo-ship-aerodynamics) · [Numerical model](#-numerical-approach) · [Run](#-getting-started) · [Roadmap](#-roadmap)**
 
-<p align="center">
-  <img src="assets/city_simulation.png" width="45%" alt="Fluid simulation around a city-like geometry">
-  <img src="assets/test_protection (4).png" width="45%" alt="Fluid simulation test">
-</p>
-
-<p align="center">
-  <img src="assets/Von Karman (1).png" width="45%" alt="Von Karman vortex street">
-  <img src="assets/Von Karman (3).png" width="45%" alt="Von Karman vortex street">
-</p>
+</div>
 
 ---
 
-## 📖 About the project
+## 🖥️ Simulation gallery
 
-This repository contains the numerical simulation developed for my **TIPE 2026**.
+<div align="center">
+  <img src="assets/city_simulation.png" width="48%" alt="Flow around multiple obstacles">
+  <img src="assets/test_protection%20(4).png" width="48%" alt="Flow interaction with protective geometry">
+  <p><em>Exploring the influence of obstacles and geometry on the flow.</em></p>
+  <img src="assets/Von%20Karman%20(1).png" width="48%" alt="Von Kármán wake, first view">
+  <img src="assets/Von%20Karman%20(3).png" width="48%" alt="Von Kármán wake, second view">
+  <p><em>Wake formation and vortex shedding behind obstacles.</em></p>
+</div>
 
-The project aims to build a controllable numerical model of a fluid interacting with solid objects, then use this model to study the aerodynamic consequences of different configurations for **wind-assisted ship propulsion**.
+### Recent simulation captures
 
-The project has progressively evolved from a basic fluid solver into a more complete simulation environment including:
+<div align="center">
+  <img src="assets/Capture%20d%27%C3%A9cran%202026-10-13%20153646.png" width="48%" alt="Simulation capture, October 2026">
+  <img src="assets/Capture%20d%27%C3%A9cran%202026-10-13%20153653.png" width="48%" alt="Simulation capture, October 2026">
+  <img src="assets/Capture%20d%27%C3%A9cran%202026-10-13%20154043.png" width="48%" alt="Simulation capture, October 2026">
+  <p><em>Recent screenshots available in the repository's assets directory.</em></p>
+</div>
 
-- 🌬️ **Fluid velocity and density**
-- 🧱 **Solid obstacles and walls**
-- 📐 **Pressure and force computation**
-- 🌀 **Flow interaction and wake formation**
-- 📊 **Real-time force monitoring**
-- 🖱️ **Interactive obstacle drawing**
-- ⚙️ **Live simulation parameters**
-- ⏸️ **Pause / resume controls**
-- 📸 **Simulation screenshots**
-- 🚢 **Ship and container-layout modelling**
-- 🧮 **Comparison of different layouts**
-- 🏆 **Layout scoring based on drag and torque**
-
-The long-term objective is to connect the numerical fluid model with the optimisation of **wingsails** and ship configurations.
+> This is an evolving educational/research project. Images illustrate numerical experiments, not validated industrial CFD results.
 
 ---
 
-## 🎯 Scientific objective
+## 📖 Project overview
 
-Wind-assisted propulsion is an increasingly interesting approach to reducing fuel consumption and emissions from commercial ships.
+This repository documents the numerical work developed for a **TIPE (Travaux d'Initiative Personnelle Encadrés)** project. What began as a general-purpose fluid simulation has developed into a framework for examining an engineering question:
 
-A wingsail behaves in a similar way to an aircraft wing: an airflow around a suitable geometry creates a pressure distribution and therefore an aerodynamic force.
+> **How can the exposed geometry of a container ship be modified to reduce aerodynamic resistance, and how could wind assistance contribute to more efficient maritime transport?**
 
-The project therefore aims to establish the following chain:
+The approach is deliberately progressive: **model a flow → observe it around obstacles → calculate forces → construct ship geometries → compare configurations → work toward optimisation**.
+
+The repository contains the Rust implementation, screenshots, presentation material and scientific bibliography.
+
+## 🚢 From fluid flow to cargo-ship aerodynamics
+
+### 1. Why ships?
+
+Large cargo ships carry stacked containers, deck structures and a substantial hull above the waterline. Wind acts on these exposed surfaces, generating pressure differences and aerodynamic forces. The resulting resistance depends not only on wind speed and direction but also on **how the containers and other structures are arranged**.
+
+This suggests two complementary research directions:
+
+- **Reduce unwanted aerodynamic drag:** modify container stacking and add fairings to improve the airflow around exposed structures.
+- **Harness the wind:** investigate wind-assisted propulsion, particularly rigid wingsails, as a future extension of the aerodynamic model.
+
+These are related but **not identical** problems. Improving container aerodynamics reduces losses; a wingsail aims to generate a useful propulsive-force component. The current code focuses more directly on the former.
+
+### 2. Modelling the ship in two dimensions
+
+The `src/ship.rs` module builds a **side-profile representation of a container ship**, rather than a full three-dimensional hull. Its configurable features include:
+
+- the main hull, bow and stern;
+- bow rake, stern rake, curvature and forecastle rise;
+- visible freeboard and the illustrated underwater outline;
+- individual container positions and dimensions;
+- aerodynamic fairings placed ahead of or behind container stacks;
+- the direction of the tested airflow.
+
+The profile includes a **static waterline**. In this ship-layout model, the region below the waterline is treated as a blocked domain; the underwater silhouette is primarily a geometric/visual representation, **not a solved hydrodynamic flow around the hull**.
+
+### 3. Container stacking strategies
+
+Container arrangements are described by `ContainerLayoutKind`:
+
+| Configuration | Idea | Aerodynamic question |
+| --- | --- | --- |
+| **Grid** | Regular rows and columns | What happens when containers form abrupt exposed faces? |
+| **Pyramid** | Stacks with a tapered arrangement | Can gradual height transitions alter the flow and drag? |
+| **Staggered** | Offset container stacks | How does shifting exposed edges change the wake? |
+
+The program can generate layouts, evaluate them over a prescribed number of simulation steps and compare their computed scores. This is an exploratory **numerical comparison**, not yet a validated claim that any particular arrangement saves a given percentage of fuel.
+
+### 4. Aerodynamic fairings
+
+The ship model supports fairings at the bow and stern of the cargo area. Implemented profile families include:
+
+`Triangular` · `Rounded` · `Parabolic` · `Stepped` · `TopCover` · `Sail` · `Arc`
+
+Fairing length, height, position and shape can be changed to investigate how the flow interacts with the first and last container stacks.
+
+**Working hypothesis:** smoother geometric transitions may mitigate adverse pressure distributions and reduce some components of aerodynamic resistance. The simulation is intended to test that hypothesis; it should not be assumed true for every flow condition.
+
+### 5. Measuring forces and ranking layouts
+
+The code distinguishes labelled wall cells belonging to the **hull, containers and fairings**. Forces computed at these cells are aggregated into component-level and overall quantities.
+
+For each tested layout the current implementation reports:
+
+- hull-associated force;
+- force for each identified container;
+- total drag projected onto the selected flow direction;
+- a total torque metric;
+- a weighted comparison score.
+
+The current score implemented in `src/ship.rs` is:
 
 ```text
-                WIND
-                  ↓
-        ┌─────────────────┐
-        │ Ship / Wingsail │
-        └────────┬────────┘
-                 ↓
-        ┌─────────────────┐
-        │ Fluid simulation│
-        └────────┬────────┘
-                 ↓
-        Pressure / velocity
-                 ↓
-        Aerodynamic forces
-                 ↓
-       Geometry / layout study
-                 ↓
-             Optimisation
-                 ↓
-        ⛵ Wind-assisted
-           propulsion
+score = W_DRAG × abs(total_drag) + W_TORQUE × total_torque
 ```
 
-The final goal is to determine how geometry, flow conditions and ship configuration influence aerodynamic performance.
+The torque metric is computed as the sum of absolute object torques. The weights are configurable in `src/conditions.rs`. **Lower scores are preferred by the ranking routine**, but the two terms require appropriate scaling and validation before the score can be interpreted as an engineering optimum.
+
+```text
+       Ship geometry / container layout
+                      │
+                      ▼
+             Build 2D obstacles
+                      │
+                      ▼
+             Simulate airflow
+                      │
+                      ▼
+        Estimate forces on boundaries
+                      │
+             ┌────────┴────────┐
+             ▼                 ▼
+          Hull / fairings   Containers
+             └────────┬────────┘
+                      ▼
+              Drag and torque
+                      │
+                      ▼
+             Weighted comparison
+                      │
+                      ▼
+             Rank candidate layouts
+```
+
+### 6. Wind profile above the surface
+
+Wind velocity generally varies with height in the atmospheric boundary layer. The project includes configurable inflow profiles in `src/conditions.rs`:
+
+- **Uniform** — constant incoming velocity;
+- **Power law** — velocity depending on height through an adjustable exponent;
+- **Logarithmic law** — a height-dependent profile with a roughness-length parameter.
+
+The chosen reference height, exponent and roughness parameters let the project explore different assumptions about wind exposure. They are modelling inputs, not site-calibrated weather data.
+
+### 7. Towards wingsail-assisted propulsion
+
+A rigid wingsail can develop an aerodynamic force from the airflow around its profile. Only the component useful for moving the vessel contributes directly to propulsion; other components can create side loads and moments.
+
+The longer-term aim is to use the simulator to study **profile geometry, apparent-wind direction and angle of attack**, then examine the trade-off between useful force, drag and torque. Realistic wingsail design and coupled vessel-performance predictions **remain future work**.
 
 ---
 
-## 🧮 Numerical model
+## 🧮 Numerical approach
 
-The simulation discretises the fluid domain into a two-dimensional computational grid.
+The simulator uses a **two-dimensional discretised fluid domain**, with grid cells representing fluid quantities and solid boundaries.
 
-Each cell contains information used to describe the local state of the fluid and its interaction with solid walls.
+The main code is separated into:
 
-### Grid
-
-Two grid implementations are currently present:
-
-- **`Grid`** — the main grid implementation used by the interactive simulation.
-- **`Grid2`** — an experimental implementation using a **Morton/Z-order encoding** for grid storage.
-
-The program can select between several simulation modes through the `GRID` configuration.
-
-### Fluid quantities
-
-The model works with quantities including:
-
-- fluid velocity,
-- fluid density,
-- viscosity,
-- pressure,
-- forces acting on solid objects,
-- torque generated by the flow.
-
-### Boundary conditions and obstacles
-
-Solid objects are represented as walls inside the computational domain.
-
-The interactive application also allows walls to be drawn directly with the mouse, making it possible to create or modify obstacles while the simulation is running.
-
-### Forces
-
-The simulation can compute the forces acting on objects and extract quantities such as:
-
-- total drag,
-- total torque,
-- force components,
-- force contributions associated with ship components and containers.
-
----
-
-## 🖥️ Interactive simulation
-
-The current interactive mode is based on a GPU-accelerated rendering pipeline using **`pixels` / `wgpu`**, with an **egui** interface.
-
-The simulation window provides live controls for:
-
-| Parameter | Description |
+| Module | Role |
 | --- | --- |
-| 🌬️ **Flow velocity** | Controls the incoming fluid velocity |
-| 🧊 **Flow density** | Controls the fluid density |
-| 💧 **Viscosity** | Controls the viscosity parameter |
-| 📉 **Drag weight** | Weight used for the drag component of the score |
-| 🔄 **Torque weight** | Weight used for the torque component of the score |
-| ⏸️ **Pause / Resume** | Stops or restarts the simulation |
-| 📸 **Screenshot** | Saves the current simulation frame |
+| `src/grid.rs` | Main fluid grid, velocity and density evolution, obstacles |
+| `src/grid2.rs` | Experimental grid with Morton / Z-order indexing |
+| `src/pressure_computation.rs` | Pressure-related computations |
+| `src/pressure_computation2.rs` | Alternative pressure routines |
+| `src/objects.rs` | Object identification, force and torque calculations |
+| `src/ship.rs` | Ship profiles, container layouts, fairings and layout comparison |
+| `src/water.rs` | Experimental two-fluid air/water functions |
+| `src/conditions.rs` | Numerical, physical and scenario parameters |
+| `src/app.rs` | Interactive rendering and controls |
+| `src/visualization.rs` | Supporting / earlier visualisation code |
+| `src/main.rs` | Program entry point and execution-mode selection |
 
-The application also displays a real-time plot of **drag and torque**.
+### Interactive experiments
 
-### 🖱️ Interactive walls
+The graphical application uses **pixels/wgpu** for rendering and **egui** for its controls. Depending on the selected scenario, the interface exposes flow and geometry parameters, lets the user draw obstacles and provides drag/torque monitoring.
 
-While the simulation is running, the left mouse button can be used to draw walls directly onto the computational grid.
+It also includes pause/resume, single-step execution and screenshot capture.
 
-This makes it possible to quickly test different obstacle geometries without modifying the source code.
+### Experimental air–water model
 
----
+A separate module, `src/water.rs`, introduces a **VOF-inspired phase field**:
 
-## 🚢 Ship and container layouts
+- `phase = 0`: air;
+- `phase = 1`: water;
+- intermediate values: a numerically diffuse interface.
 
-The project now includes a dedicated module for studying **ship layouts and container placement**.
-
-A `ShipLayout` describes:
-
-- the ship hull geometry,
-- the position and dimensions of containers,
-- the flow direction associated with the tested configuration.
-
-Containers and hull cells are labelled separately, allowing their respective force contributions to be extracted from the simulation.
-
-### Layout evaluation
-
-A layout can be simulated for a given number of steps and evaluated using:
-
-- 🚢 **Hull force**
-- 📦 **Force on each container**
-- 📉 **Total drag**
-- 🔄 **Total torque**
-- 🏆 **Global score**
-
-The current score is a weighted combination of drag and torque:
-
-```text
-score = W_DRAG × |drag| + W_TORQUE × torque
-```
-
-This provides a simple objective function for comparing different configurations.
-
-### Layout comparison
-
-Several layouts can be evaluated automatically and ranked according to their score.
-
-```text
-┌─────────────────────────┐
-│     Ship configuration  │
-└────────────┬────────────┘
-             ↓
-     Run fluid simulation
-             ↓
-     Compute wall forces
-             ↓
-   ┌─────────┴─────────┐
-   ↓                   ↓
-Hull forces      Container forces
-   │                   │
-   └─────────┬─────────┘
-             ↓
-      Total drag / torque
-             ↓
-        Global score
-             ↓
-      Layout comparison
-```
-
-This forms the basis for a future optimisation procedure.
+Local density is interpolated between air and water; the module also contains gravity and phase-advection routines. However, **`ENABLE_WATER` is currently `false` by default**, and the configured water/air density ratio is deliberately reduced for numerical stability. It must therefore be treated as **experimental**, not as a validated wave, buoyancy or ship-hydrodynamics solver.
 
 ---
 
-## ⚙️ Available simulation modes
+## ⚙️ Getting started
 
-The program currently supports several execution paths selected through the `GRID` configuration:
+### Requirements
 
-| Mode | Purpose |
+- Rust toolchain with Cargo (edition **2024** support);
+- a desktop environment capable of opening the application's graphics window.
+
+### Build and run
+
+```bash
+git clone https://github.com/Astraheim/Fluid-simulation-TIPE.git
+cd Fluid-simulation-TIPE
+cargo run --release
+```
+
+The executable is configured through constants in `src/conditions.rs`, notably:
+
+| Setting | Purpose |
 | --- | --- |
-| `GRID = "1"` | Main `Grid` implementation and basic numerical tests |
-| `GRID = "2"` | Experimental `Grid2` implementation using Morton/Z-order storage |
-| `GRID = "3"` | Interactive simulation application |
+| `GRID = "1"` | Main grid / basic test path |
+| `GRID = "2"` | Experimental Morton-indexed grid |
+| `GRID = "3"` | Interactive application (**current default**) |
+| `N`, `DT`, `VISCOSITY` | Grid size, timestep and viscosity |
+| `W_DRAG`, `W_TORQUE` | Layout ranking weights |
+| `WIND_PROFILE` | Inflow wind-profile model |
+| `ENABLE_WATER` | Experimental two-fluid mode (**disabled by default**) |
 
-The interactive mode is currently the main user-facing simulation environment.
-
----
-
-## 🏗️ Project structure
-
-```text
-Fluid-simulation-TIPE/
-│
-├── assets/
-│   ├── city_simulation.png
-│   ├── test_protection (4).png
-│   ├── Von Karman (1).png
-│   └── Von Karman (3).png
-│
-├── src/
-│   ├── app.rs
-│   ├── conditions.rs
-│   ├── grid.rs
-│   ├── grid2.rs
-│   ├── main.rs
-│   ├── objects.rs
-│   ├── pressure_computation.rs
-│   ├── pressure_computation2.rs
-│   ├── ship.rs
-│   └── visualization.rs
-│
-├── TEST FUNCTIONS/
-│
-├── Cargo.toml
-├── Cargo.lock
-└── README.md
-```
-
-### Main modules
-
-| File | Purpose |
-| --- | --- |
-| `main.rs` | Program entry point and simulation-mode selection |
-| `app.rs` | Interactive simulation window, UI and real-time controls |
-| `grid.rs` | Main computational grid |
-| `grid2.rs` | Experimental Morton/Z-order grid |
-| `conditions.rs` | Global simulation and physical parameters |
-| `objects.rs` | Object detection and force-related structures |
-| `pressure_computation.rs` | Pressure and wall-force computation |
-| `pressure_computation2.rs` | Alternative pressure-computation implementation |
-| `ship.rs` | Ship layouts, container placement and layout comparison |
-| `visualization.rs` | Previous / supporting visualisation tools |
-
-The code is intentionally divided into independent modules so that different numerical approaches can be tested and compared during the development of the TIPE.
+Some scenarios and parameter combinations may still require tuning: the repository is an active research prototype, not a packaged end-user application.
 
 ---
 
-## 🦀 Technologies
+## 🦀 Technical stack
 
-The project is written in **Rust**.
+**Rust** · **Rayon** (parallel computation) · **pixels / wgpu** (framebuffer and GPU rendering) · **egui / winit** (desktop UI) · **Plotters** and **egui_plot** (plots) · **Rand** (randomised layouts) · **minifb** (legacy/simple visualisation).
 
-The repository currently relies on crates including:
+The emphasis is on a transparent numerical implementation that can be modified, measured and analysed during the TIPE.
 
-- **Plotters** — data visualisation
-- **minifb** — lightweight graphical windowing / legacy visualisation
-- **Rayon** — parallel computation
-- **Rand** — random number generation
+## 📚 Research material
 
-The interactive application additionally uses a GPU-oriented rendering stack based on:
+The `Biblio/` directory contains research material on:
 
-- **pixels**
-- **wgpu**
-- **egui**
-- **egui-wgpu**
-- **egui-winit**
-- **winit**
+- fluid simulation and numerical methods;
+- **wind loads on container ships**;
+- **container configurations, stacking and aerodynamic fairings**;
+- **rigid wingsails and wind-assisted ship propulsion**.
 
-Rust was chosen for its performance, memory safety and suitability for computationally intensive numerical simulations.
+The `LATEX/` directory also stores presentation material and figures associated with the development of the project.
+
+These references provide scientific context; their conclusions must be distinguished from results actually reproduced by this solver.
 
 ---
 
-## 📊 From fluid simulation to optimisation
+## 🔬 Roadmap
 
-The project is structured around a progressive approach:
+### Implemented or available in the repository
 
-```text
-┌──────────────────────────┐
-│   Numerical fluid model  │
-└────────────┬─────────────┘
-             ↓
-┌──────────────────────────┐
-│ Pressure / velocity field│
-└────────────┬─────────────┘
-             ↓
-┌──────────────────────────┐
-│ Aerodynamic forces       │
-└────────────┬─────────────┘
-             ↓
-┌──────────────────────────┐
-│ Ship / wingsail geometry │
-│ • hull                   │
-│ • containers             │
-│ • profile                │
-│ • angle of attack        │
-└────────────┬─────────────┘
-             ↓
-┌──────────────────────────┐
-│ Performance evaluation   │
-│ • drag                   │
-│ • torque                 │
-│ • score                  │
-└────────────┬─────────────┘
-             ↓
-┌──────────────────────────┐
-│ Configuration comparison │
-└────────────┬─────────────┘
-             ↓
-┌──────────────────────────┐
-│ Future optimisation      │
-└──────────────────────────┘
-```
+- [x] 2D fluid grid, obstacles and flow visualisation
+- [x] Interactive controls and force/torque display
+- [x] Object force estimation
+- [x] Ship side-profile geometry with configurable bow and stern
+- [x] Container layout generation and comparison
+- [x] Several bow/stern fairing profiles
+- [x] Height-dependent inflow wind profiles
+- [x] Weighted drag/torque ranking
+- [x] Experimental Morton grid
+- [x] Experimental air/water phase-field module (not enabled by default)
 
-The objective is not to immediately reproduce every aspect of real-world CFD, but to develop a numerical model that remains understandable and controllable while being sufficiently useful to investigate the physical phenomena relevant to the TIPE.
+### Remaining research and development
 
----
+- [ ] Quantify numerical convergence and stability
+- [ ] Validate force estimates against reference solutions or measurements
+- [ ] Document units, scaling and grid sensitivity
+- [ ] Establish repeatable benchmarks for container/fairing variants
+- [ ] Improve physical realism, including three-dimensional effects
+- [ ] Implement and evaluate realistic rigid wingsails
+- [ ] Study apparent wind and angle of attack
+- [ ] Relate simulated aerodynamic changes to vessel-level performance
 
-## 🔬 Current state
+## ⚠️ Scope and limitations
 
-> 🚧 **Work in progress**
+This is a **simplified 2D numerical research tool**, not a fully validated CFD package.
 
-The project has moved beyond the initial fluid-flow prototype and now includes an interactive simulation environment as well as the first tools for studying ship layouts.
+Important limitations include the simplified boundary conditions and turbulence treatment, finite grid resolution, potential numerical diffusion, no complete three-dimensional representation of the ship, and no validated coupling between aerodynamic forces, hydrodynamics and fuel consumption.
 
-### Implemented
-
-- [x] Two-dimensional computational grid
-- [x] Fluid density and velocity modelling
-- [x] Solid walls and obstacles
-- [x] Pressure / wall-force computation
-- [x] Object force and torque calculation
-- [x] Interactive simulation window
-- [x] Real-time physical parameters
-- [x] Pause / resume
-- [x] Interactive wall drawing
-- [x] Real-time drag / torque plot
-- [x] Screenshot export
-- [x] Experimental Morton/Z-order grid
-- [x] Ship hull representation
-- [x] Container representation
-- [x] Separate hull / container force extraction
-- [x] Layout scoring
-- [x] Comparison and ranking of layouts
-
-### In development
-
-- [ ] Improve the physical model
-- [ ] Improve numerical stability
-- [ ] Validate the simulation against analytical or experimental results
-- [ ] Refine ship geometries
-- [ ] Improve container-layout modelling
-- [ ] Implement realistic wingsail geometries
-- [ ] Study the influence of angle of attack
-- [ ] Compare different wingsail profiles
-- [ ] Develop a dedicated optimisation algorithm
-- [ ] Connect the aerodynamic model to wind-assisted ship propulsion
-
----
-
-## ⚠️ Limitations
-
-The current model remains a simplified numerical representation of a fluid flow.
-
-Real aerodynamic flows around ships and wingsails involve phenomena such as:
-
-- viscosity,
-- turbulence,
-- boundary layers,
-- flow separation,
-- wake formation,
-- three-dimensional effects.
-
-The current simulation should therefore be interpreted as a **research and educational numerical model**, rather than as a complete CFD solver.
-
-One of the main objectives of the project is to determine which level of physical modelling is sufficient to obtain useful results while keeping the simulation computationally tractable.
-
----
-
-## 📈 Project philosophy
-
-The project follows a progressive methodology:
-
-**Model → Simulate → Measure → Compare → Validate → Optimise**
-
-Rather than directly implementing a complex CFD solver, the objective is to understand and control each part of the numerical model.
-
-This makes the simulation both:
-
-- a **research tool** for the TIPE,
-- and a way to investigate the underlying physical phenomena.
-
----
-
-## 📚 Scientific context
-
-This project is part of a broader study of **wind-assisted ship propulsion** and the optimisation of ship and wingsail configurations.
-
-The numerical work aims to create a link between theoretical fluid mechanics and a practical engineering problem:
-
-> **How can the geometry and operating conditions of a ship and its wingsail be optimised to maximise the useful aerodynamic force while limiting unwanted drag and torque?**
-
-The simulation therefore focuses on building a controllable numerical framework that can progressively be extended toward more realistic ship and wingsail configurations.
+**A lower simulated drag score should not be interpreted directly as a proven fuel saving.** Meaningful quantitative comparisons require convergence studies, credible reference cases and physically consistent scaling.
 
 ---
 
 ## 👤 Author
 
-**Astraheim**
+**[Astraheim](https://github.com/Astraheim)** — TIPE research project, 2026.
 
-**TIPE — 2026**
+*Fluid mechanics · Numerical simulation · Cargo-ship aerodynamics · Container optimisation · Wind-assisted propulsion*
 
-`Fluid Mechanics · Numerical Simulation · Aerodynamics · Wingsails · Ship Propulsion · Optimisation`
-
----
-
-## 📜 License
-
-This project is primarily intended for educational and research purposes as part of a **TIPE project**.
+> **License:** No open-source license is declared in this repository. Please consult the author before reuse beyond what copyright law permits.
