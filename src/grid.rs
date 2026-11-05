@@ -85,9 +85,6 @@ impl Grid {
 pub struct Grid {
     pub wind_min_height: f32,
     pub realistic_wind: bool,
-    pub projection_iterations: usize,
-    pub projection_residual: f64,
-    pub projection_converged: bool,
     pub cells: Vec<Cell>,
     /// True dès qu'un mur a été ajouté depuis le dernier calcul du cache
     /// ci-dessous (voir `wall_init`, seule fonction qui pose un mur).
@@ -239,9 +236,6 @@ impl Grid {
         let mut grid = Self {
             wind_min_height: 0.0,
             realistic_wind: true,
-            projection_iterations: 0,
-            projection_residual: 0.0,
-            projection_converged: true,
             cells: vec![Cell::default(); SIZE as usize],
             wall_topology_dirty: true,
             wall_cells_cache: Vec::new(),
@@ -355,7 +349,7 @@ impl Grid {
                 let v_center = 0.25 * (v_nw + v_ne + v_sw + v_se);
 
                 // Backtracking + clamp aux frontières
-                let x = (pos_x - dt0 * u_center).clamp(1.0, N + 1.0);
+                let x = (pos_x - dt0 * u_center).clamp(0.5, N + 0.5);
                 // Convertir la position physique en indices du tableau u.
                 let y = (pos_y - dt0 * v_center - 0.5).clamp(0.5, N + 0.5);
 
@@ -614,84 +608,170 @@ impl Grid {
     // Modification of project to work with staggered grid and walls
     pub fn project(&mut self) {
         self.enforce_solid_faces();
-        let n = N as usize;
-        let h = 1.0 / N as f64;
-        let mut cells = Vec::new();
-        let mut ids = vec![usize::MAX; self.cells.len()];
-        for i in 1..=n {
-            for j in 1..=n {
+        let h = 1.0 / N;
+        let mut pressure = vec![0.0; SIZE as usize];
+        let mut div = vec![0.0; SIZE as usize];
+
+        // Calculer la divergence
+        for i in 1..=(N as usize) {
+            for j in 1..=(N as usize) {
                 let idx = self.to_index(i, j);
-                if !self.cells[idx].wall {
-                    ids[idx] = cells.len();
-                    cells.push((i, j, idx));
-                }
-            }
-        }
-        let count = cells.len();
-        let mut neighbors = vec![[0; 4]; count];
-        let mut weights = vec![[0.0; 4]; count];
-        let mut diagonal = vec![0.0; count];
-        let mut rhs = vec![0.0; count];
-        for (row, &(i, j, idx)) in cells.iter().enumerate() {
-            neighbors[row] = [row; 4];
-            rhs[row] = -h
-                * (self.get_u(i + 1, j) as f64 - self.get_u(i, j) as f64
-                    + self.get_v(i, j + 1) as f64
-                    - self.get_v(i, j) as f64);
-            let rho = if ENABLE_WATER {
-                self.local_rho(idx) as f64
-            } else {
-                1.0
-            };
-            for (direction, (ni, nj)) in [(i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)]
-                .into_iter()
-                .enumerate()
-            {
-                let other = self.to_index(ni, nj);
-                if self.cells[other].wall {
+                if self.cells[idx].wall {
+                    div[idx] = 0.0;
                     continue;
                 }
-                if self.in_bounds(ni, nj) {
-                    let other_rho = if ENABLE_WATER {
-                        self.local_rho(other) as f64
+
+                // Calculer div = ∂u/∂x + ∂v/∂y
+                // Pour une staggered grid, la divergence utilise directement les vitesses aux interfaces
+                let u_right = self.get_u(i+1, j);   // u à droite de la cellule (i, j)
+                let u_left = self.get_u(i, j);      // u à gauche de la cellule (i, j)
+                let v_top = self.get_v(i, j+1);     // v en haut de la cellule (i, j)
+                let v_bottom = self.get_v(i, j);    // v en bas de la cellule (i, j)
+
+                div[idx] = -h * ((u_right - u_left) + (v_top - v_bottom));
+            }
+        }
+
+        // Résoudre l'équation de Poisson pour la pression
+        // Précalcul des poids de densité (1/ρ moyenné à chaque face) — une seule
+        // fois par appel à project(), PAS à chaque itération Gauss-Seidel.
+        let (w_l_arr, w_r_arr, w_b_arr, w_t_arr, w_sum_arr): (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) =
+            if ENABLE_WATER == true {
+                let mut w_l = vec![0.0f32; SIZE as usize];
+                let mut w_r = vec![0.0f32; SIZE as usize];
+                let mut w_b = vec![0.0f32; SIZE as usize];
+                let mut w_t = vec![0.0f32; SIZE as usize];
+                let mut w_sum = vec![1.0f32; SIZE as usize]; // évite /0 par défaut
+
+                for i in 1..=(N as usize) {
+                    for j in 1..=(N as usize) {
+                        let idx = self.to_index(i, j);
+                        if self.cells[idx].wall { continue; }
+
+                        let rho_c = self.local_rho(idx);
+                        let rho_l = if i > 1 { self.local_rho(self.to_index(i - 1, j)) } else { rho_c };
+                        let rho_r = if i < N as usize { self.local_rho(self.to_index(i + 1, j)) } else { rho_c };
+                        let rho_b = if j > 1 { self.local_rho(self.to_index(i, j - 1)) } else { rho_c };
+                        let rho_t = if j < N as usize { self.local_rho(self.to_index(i, j + 1)) } else { rho_c };
+
+                        let wl = 2.0 / (rho_c + rho_l);
+                        let wr = 2.0 / (rho_c + rho_r);
+                        let wb = 2.0 / (rho_c + rho_b);
+                        let wt = 2.0 / (rho_c + rho_t);
+
+                        w_l[idx] = wl;
+                        w_r[idx] = wr;
+                        w_b[idx] = wb;
+                        w_t[idx] = wt;
+                        w_sum[idx] = (wl + wr + wb + wt).max(1e-6);
+                    }
+                }
+                (w_l, w_r, w_b, w_t, w_sum)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
+
+        let tolerance = 1e-5;
+        for _ in 0..(if ENABLE_WATER == true { WATER_PROJECT_ITERATIONS } else { 20 }) {
+            let mut max_error: f32 = 0.0;
+
+            for i in 1..=(N as usize) {
+                for j in 1..=(N as usize) {
+                    let idx = self.to_index(i, j);
+                    if self.cells[idx].wall {
+                        continue;
+                    }
+
+                    // Calculer la nouvelle pression en utilisant Gauss-Seidel
+                    let p_left = if i > 1 && !self.cells[self.to_index(i-1, j)].wall {
+                        pressure[self.to_index(i-1, j)]
                     } else {
-                        1.0
+                        pressure[idx] // Réflexion à la paroi
                     };
-                    let weight = 2.0 / (rho + other_rho);
-                    neighbors[row][direction] = ids[other];
-                    weights[row][direction] = weight;
-                    diagonal[row] += weight;
-                } else if ni == n + 1 {
-                    // p=0 à la face de sortie, distante de h/2 du centre.
-                    diagonal[row] += 2.0 / rho;
+
+                    let p_right = if i < N as usize && !self.cells[self.to_index(i+1, j)].wall {
+                        pressure[self.to_index(i+1, j)]
+                    } else {
+                        pressure[idx] // Réflexion à la paroi
+                    };
+
+                    let p_bottom = if j > 1 && !self.cells[self.to_index(i, j-1)].wall {
+                        pressure[self.to_index(i, j-1)]
+                    } else {
+                        pressure[idx] // Réflexion à la paroi
+                    };
+
+                    let p_top = if j < N as usize && !self.cells[self.to_index(i, j+1)].wall {
+                        pressure[self.to_index(i, j+1)]
+                    } else {
+                        pressure[idx] // Réflexion à la paroi
+                    };
+
+                    let p_new = if ENABLE_WATER == true {
+                        (div[idx]
+                            + w_l_arr[idx] * p_left + w_r_arr[idx] * p_right
+                            + w_b_arr[idx] * p_bottom + w_t_arr[idx] * p_top) / w_sum_arr[idx]
+                    } else {
+                        (div[idx] + p_left + p_right + p_bottom + p_top) / 4.0
+                    };
+
+                    let err = (p_new - pressure[idx]).abs();
+                    max_error = max_error.max(err);
+                    pressure[idx] = p_new;
+                }
+            }
+
+            if max_error < tolerance {
+                break;
+            }
+        }
+
+        // NOUVEAU : recopier le champ de pression résolu dans les cellules,
+        // afin qu'il soit exploitable ailleurs (visualisation, forces...).
+        // C'était l'oubli qui faisait que le mode d'affichage "Pression" ne
+        // montrait jamais rien: `pressure` restait purement local à cette
+        // fonction et n'était jamais renvoyé vers `self.cells[idx].pressure`.
+        for i in 1..=(N as usize) {
+            for j in 1..=(N as usize) {
+                let idx = self.to_index(i, j);
+                if !self.cells[idx].wall {
+                    self.cells[idx].pressure = pressure[idx];
                 }
             }
         }
-        let (pressure, iterations, residual, converged) =
-            solve_pressure(&neighbors, &weights, &diagonal, &rhs, 4000, 1e-5, 1e-10);
-        self.projection_iterations = iterations;
-        self.projection_residual = residual;
-        self.projection_converged = converged;
-        for (row, &(i, j, idx)) in cells.iter().enumerate() {
-            self.cells[idx].pressure = pressure[row] as f32;
-            if i > 1 && weights[row][0] > 0.0 {
-                self.cells[idx].velocity_x -=
-                    (weights[row][0] * (pressure[row] - pressure[neighbors[row][0]]) / h) as f32;
-            }
-            if j > 1 && weights[row][2] > 0.0 {
-                self.cells[idx].velocity_y -=
-                    (weights[row][2] * (pressure[row] - pressure[neighbors[row][2]]) / h) as f32;
-            }
-            if i == n {
-                let outlet = self.to_index(n + 1, j);
-                if !self.cells[outlet].wall {
-                    let rho = if ENABLE_WATER {
-                        self.local_rho(idx) as f64
-                    } else {
-                        1.0
-                    };
-                    self.cells[outlet].velocity_x += (2.0 * pressure[row] / (rho * h)) as f32;
+
+        // Le Poisson utilise une réflexion (gradient normal nul) aux murs
+        // et au contour. Corriger uniquement les faces fluide-fluide internes.
+        for i in 2..=N as usize {
+            for j in 1..=N as usize {
+                let right = self.to_index(i, j);
+                let left = self.to_index(i - 1, j);
+                if self.cells[left].wall || self.cells[right].wall {
+                    continue;
                 }
+                let weight = if ENABLE_WATER {
+                    w_l_arr[right]
+                } else {
+                    1.0
+                };
+                self.cells[right].velocity_x -=
+                    weight * (pressure[right] - pressure[left]) / h;
+            }
+        }
+        for i in 1..=N as usize {
+            for j in 2..=N as usize {
+                let top = self.to_index(i, j);
+                let bottom = self.to_index(i, j - 1);
+                if self.cells[bottom].wall || self.cells[top].wall {
+                    continue;
+                }
+                let weight = if ENABLE_WATER {
+                    w_b_arr[top]
+                } else {
+                    1.0
+                };
+                self.cells[top].velocity_y -=
+                    weight * (pressure[top] - pressure[bottom]) / h;
             }
         }
     }
@@ -722,38 +802,91 @@ impl Grid {
 
     /// Impose u=0, v=0 in obstacles and walls, constant inflow on the left, outflow (∂/∂x=0) on the right and on the top/bottom
     // Modification de apply_boundary_conditions pour une staggered grid
-    /// Profil d'entrée au-dessus d'une hauteur mesurée depuis le bas.
-    pub fn inlet_velocity(&self, j: usize, speed: f32) -> f32 {
+    pub fn inlet_profile_factor(&self, j: usize) -> f32 {
         if N - j as f32 + 0.5 < self.wind_min_height {
-            return 0.0;
-        }
-        let idx = self.to_index(1, j);
-        let air = if ENABLE_WATER {
-            1.0 - self.cells[idx].phase.clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        let profile = if self.realistic_wind {
+            0.0
+        } else if self.realistic_wind {
             wind_profile_factor(j)
         } else {
             1.0
-        };
-        speed * air * profile
+        }
     }
 
-    /// Entrée imposée, haut/bas imperméables à glissement libre.
-    /// La vitesse de sortie est déterminée par project(), avec p=0 à droite.
     pub fn apply_boundary_conditions(&mut self, inflow_velocity: f32) {
         let n = N as usize;
+
+        // Conditions aux limites pour la vitesse horizontale u
         for j in 1..=n {
-            self.set_u(1, j, self.inlet_velocity(j, inflow_velocity));
+            // Entrée à gauche (inflow)
+            // Entrée à gauche (inflow) : n'injecter la vitesse d'air qu'en proportion
+            // de la fraction d'air locale — l'eau n'est pas soufflée à la vitesse du vent.
+            let idx_here = self.to_index(1, j);
+            let air_fraction = 1.0 - self.cells[idx_here].phase.clamp(0.0, 1.0);
+            self.set_u(1, j, inflow_velocity * air_fraction * self.inlet_profile_factor(j));
+
+            // Sortie à droite (outflow): ∂u/∂x = 0
+            self.set_u(n+1, j, self.get_u(n, j));
+
+            // Parois (no-slip)
+            for i in 1..=n+1 {
+                let idx = self.to_index(i, j);
+                if self.cells[idx].wall {
+                    self.set_u(i, j, 0.0);
+                }
+            }
         }
+
+        // Conditions aux limites pour la vitesse verticale v
         for i in 1..=n {
-            self.set_v(i, 1, 0.0);
-            self.set_v(i, n + 1, 0.0);
+            // Haut: ∂v/∂y = 0 (le ciel reste ouvert, inchangé)
+            self.set_v(i, 1, self.get_v(i, 2));
+
+            // Bas: sol solide en mode eau (empêche l'eau de fuir hors du domaine),
+            // sinon comportement d'origine (sortie libre) en mono-fluide.
+            if ENABLE_WATER == true {
+                self.set_v(i, n+1, 0.0);
+            } else {
+                self.set_v(i, n+1, self.get_v(i, n));
+            }
+
+            // Parois (no-slip)
+            for j in 1..=n+1 {
+                let idx = self.to_index(i, j);
+                if self.cells[idx].wall {
+                    self.set_v(i, j, 0.0);
+                }
+            }
+        }
+
+        // Conditions spéciales aux coins
+
+        // Coin supérieur gauche
+        if !self.cells[self.to_index(1, 1)].wall {
+            self.set_u(1, 1, inflow_velocity * self.inlet_profile_factor(1));
+            self.set_v(1, 1, 0.0);
+        }
+
+        // Coin supérieur droit
+        if !self.cells[self.to_index(n, 1)].wall {
+            self.set_u(n+1, 1, self.get_u(n, 1));
+            self.set_v(n, 1, 0.0);
+        }
+
+        // Coin inférieur gauche
+        if !self.cells[self.to_index(1, n)].wall {
+            self.set_u(1, n, inflow_velocity * self.inlet_profile_factor(n));
+            self.set_v(1, n+1, 0.0);
+        }
+
+        // Coin inférieur droit
+        if !self.cells[self.to_index(n, n)].wall {
+            self.set_u(n+1, n, self.get_u(n, n));
+            self.set_v(n, n+1, 0.0);
         }
         self.enforce_solid_faces();
     }
+
+
 
     /// Extrapolate the velocity field at the boundaries
     pub fn extrapolate(&mut self) {
@@ -992,25 +1125,74 @@ impl Grid {
     }
 
 
-    // Compatibilité avec les appels historiques : le tunnel est désormais
-    // défini par ses conditions aux limites, sans coffre solide.
-    pub fn setup_wind_tunnel_walls(&mut self, _hole_positions: &[usize]) {}
+    /// Pose une bonne fois pour toutes les murs du tunnel de vent (coffre
+    /// gauche plein, coffre droit percé aux positions données). À appeler
+    /// UNE SEULE FOIS au setup (ou après un Grid::new()/apply_layout qui a
+    /// remis la grille à zéro) : la géométrie ne change jamais ensuite, donc
+    /// inutile de rescanner 1..=N à chaque frame pour la reposer.
+    /// Le `if !cells[idx].wall` garde la fonction idempotente si jamais elle
+    /// est rappelée par erreur (pas de spam "Impossible to modify a wall!").
+    pub fn setup_wind_tunnel_walls(&mut self, hole_positions: &[usize]) {
+        let left_wall = 1;
+        let box_width = (N as usize / 30).max(2); // Width of the box
+        let right_wall = left_wall + box_width;
 
-    pub fn inject_wind_tunnel_flow(&mut self, density: f32, flow_velocity: f32) {
-        self.apply_boundary_conditions(flow_velocity);
         for j in 1..=N as usize {
-            let idx = self.to_index(1, j);
-            if !self.cells[idx].wall {
-                self.cells[idx].density = if self.inlet_velocity(j, flow_velocity) > 0.0 {
-                    density
-                } else { 0.0 };
+            let idx_left = self.to_index(left_wall, j);
+            if !self.cells[idx_left].wall {
+                self.wall_init(j, left_wall, true); // Left wall
+            }
+
+            if !hole_positions.contains(&j) {
+                let idx_right = self.to_index(right_wall, j);
+                if !self.cells[idx_right].wall {
+                    self.wall_init(j, right_wall, true); // Right wall, except for holes
+                }
             }
         }
     }
 
-    pub fn initialize_wind_tunnel(&mut self, density: f32, flow_velocity: f32, _hole_positions: &[usize]) {
+    /// Injecte densité/vitesse dans le coffre du tunnel de vent. Contrairement
+    /// aux murs (géométrie fixe, voir `setup_wind_tunnel_walls`), l'injection
+    /// DOIT être répétée à chaque frame pour maintenir le flux entrant.
+    pub fn inject_wind_tunnel_flow(&mut self, density: f32, flow_velocity: f32) {
+        let left_wall = 1;
+        let box_width = (N as usize / 30).max(2);
+        let right_wall = left_wall + box_width;
+
+        for i in (left_wall + 2)..=right_wall - 5 {
+            for j in 2..=N as usize - 1 {
+                let idx = self.to_index(i, j);
+                if self.cells[idx].wall {
+                    continue;
+                }
+
+                // Vitesse locale selon le profil de vent (dépend de la hauteur j)
+                let wf = self.inlet_profile_factor(j);
+
+                if ENABLE_WATER == true {
+                    let air_fraction = 1.0 - self.cells[idx].phase.clamp(0.0, 1.0);
+                    if air_fraction < 0.5 {
+                        continue;
+                    }
+                    self.cell_init(i, j, flow_velocity * wf * air_fraction, 0.0, density * air_fraction);
+                } else {
+                    self.cell_init(i, j, flow_velocity * wf, 0.0, density);
+                }
+            }
+        }
+    }
+
+    /// Create a wind tunnel like setup to test as in wind tunnel experiments.
+    /// Conservé pour compatibilité (scripts headless, anciens appels) : fait
+    /// les murs ET l'injection en un seul appel. Dans une boucle interactive,
+    /// préférer `setup_wind_tunnel_walls()` une fois au setup, puis
+    /// `inject_wind_tunnel_flow()` à chaque frame — voir app.rs.
+    pub fn initialize_wind_tunnel(&mut self, density: f32, flow_velocity: f32, hole_positions: &[usize]) {
+        self.setup_wind_tunnel_walls(hole_positions);
         self.inject_wind_tunnel_flow(density, flow_velocity);
     }
+
 
 
     /// Attempt to create karman vortex formation favorable conditions
@@ -1059,19 +1241,31 @@ impl Grid {
 
     /// Perform a step in the simulation with another method
     pub fn vel2_step(&mut self, inflow_velocity: f32) {
+        if ENABLE_WATER {
+            self.apply_gravity(GRAVITY_X, GRAVITY_Y, DT);   // <-- AVANT project()
+        }
+
+        if PROJECT == "1" {
+            self.project();
+        } else if PROJECT == "2" {
+            panic!("PROJECT2 non implémenté pour le moment");
+        } else {
+            panic!("Valeur PROJECT invalide");
+        }
+
         self.apply_boundary_conditions(inflow_velocity);
         self.extrapolate();
         self.advect_velocity(DT);
-        if ENABLE_WATER {
-            self.apply_gravity(GRAVITY_X, GRAVITY_Y, DT);
+        self.advect_density(DT);
+
+        if ENABLE_WATER == true{
+            self.advect_phase(DT);
             self.clamp_velocity_field(MAX_VELOCITY);
         }
+
         self.apply_boundary_conditions(inflow_velocity);
-        self.project();
-        self.extrapolate();
-        self.advect_density(DT);
-        if ENABLE_WATER { self.advect_phase(DT); }
     }
+
 
 
     /// Perform a step in the simulation with cip-csl4 method (not working)
@@ -1100,191 +1294,4 @@ impl Grid {
 
 
 
-}
-
-/// Gradient conjugué préconditionné par la diagonale, en double précision.
-/// Le critère d'arrêt porte sur ||b-Ap||_2, avec plafond d'itérations explicite.
-fn solve_pressure(
-    neighbors: &[[usize; 4]],
-    weights: &[[f64; 4]],
-    diagonal: &[f64],
-    rhs: &[f64],
-    max_iterations: usize,
-    relative_tolerance: f64,
-    absolute_tolerance: f64,
-) -> (Vec<f64>, usize, f64, bool) {
-    let apply = |x: &[f64], out: &mut [f64]| {
-        for row in 0..x.len() {
-            out[row] = diagonal[row] * x[row];
-            for d in 0..4 {
-                out[row] -= weights[row][d] * x[neighbors[row][d]];
-            }
-        }
-    };
-    let dot = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b).map(|(x, y)| x * y).sum() };
-    let mut pressure = vec![0.0; rhs.len()];
-    let mut residual = rhs.to_vec();
-    let mut z: Vec<f64> = residual
-        .iter()
-        .zip(diagonal)
-        .map(|(r, d)| r / d.max(1e-30))
-        .collect();
-    let mut direction = z.clone();
-    let mut product = vec![0.0; rhs.len()];
-    let target = absolute_tolerance.max(relative_tolerance * dot(rhs, rhs).sqrt());
-    let mut norm = dot(&residual, &residual).sqrt();
-    let mut rz = dot(&residual, &z);
-    let mut iterations = 0;
-    while norm > target && iterations < max_iterations {
-        apply(&direction, &mut product);
-        let denominator = dot(&direction, &product);
-        if denominator <= 0.0 || !denominator.is_finite() {
-            break;
-        }
-        let alpha = rz / denominator;
-        for row in 0..rhs.len() {
-            pressure[row] += alpha * direction[row];
-            residual[row] -= alpha * product[row];
-        }
-        iterations += 1;
-        norm = dot(&residual, &residual).sqrt();
-        // Vérifier le résidu réel avant d'annoncer la convergence.
-        if norm <= target {
-            apply(&pressure, &mut product);
-            for row in 0..rhs.len() {
-                residual[row] = rhs[row] - product[row];
-            }
-            norm = dot(&residual, &residual).sqrt();
-            if norm <= target {
-                break;
-            }
-            for row in 0..rhs.len() {
-                direction[row] = residual[row] / diagonal[row].max(1e-30);
-            }
-            rz = dot(&residual, &direction);
-            continue;
-        }
-        for row in 0..rhs.len() {
-            z[row] = residual[row] / diagonal[row].max(1e-30);
-        }
-        let next_rz = dot(&residual, &z);
-        let beta = next_rz / rz;
-        for row in 0..rhs.len() {
-            direction[row] = z[row] + beta * direction[row];
-        }
-        rz = next_rz;
-    }
-    apply(&pressure, &mut product);
-    norm = rhs
-        .iter()
-        .zip(&product)
-        .map(|(b, a)| (b - a) * (b - a))
-        .sum::<f64>()
-        .sqrt();
-    (pressure, iterations, norm, norm <= target)
-}
-
-#[cfg(test)]
-mod projection_tests {
-    use super::*;
-
-    fn divergence(grid: &Grid) -> f32 {
-        let mut maximum = 0.0f32;
-        for i in 1..=N as usize {
-            for j in 1..=N as usize {
-                if !grid.cells[grid.to_index(i, j)].wall {
-                    let value = N
-                        * (grid.get_u(i + 1, j) - grid.get_u(i, j) + grid.get_v(i, j + 1)
-                            - grid.get_v(i, j));
-                    maximum = maximum.max(value.abs());
-                }
-            }
-        }
-        maximum
-    }
-
-    #[test]
-    fn inlet_controls_height_and_profile() {
-        let mut grid = Grid::new();
-        grid.realistic_wind = false;
-        grid.wind_min_height = N * 0.5;
-        assert_eq!(grid.inlet_velocity(1, 2.0), 2.0);
-        assert_eq!(grid.inlet_velocity(N as usize, 2.0), 0.0);
-        grid.realistic_wind = true;
-        assert_eq!(grid.inlet_velocity(1, 2.0), 2.0 * wind_profile_factor(1));
-        grid.wind_min_height = N;
-        assert_eq!(grid.inlet_velocity(1, 2.0), 0.0);
-    }
-
-    #[test]
-    fn projection_balances_inlet_and_preserves_solid_faces() {
-        let mut grid = Grid::new();
-        grid.realistic_wind = false;
-        let n = N as usize;
-        grid.square((n / 2) as isize, (n / 2) as isize, (n / 5) as f32);
-        grid.apply_boundary_conditions(1.0);
-        grid.project();
-        assert!(
-            grid.projection_converged,
-            "residual {}",
-            grid.projection_residual
-        );
-        assert!(divergence(&grid) < 0.02, "divergence {}", divergence(&grid));
-        let incoming: f64 = (1..=n).map(|j| grid.get_u(1, j) as f64).sum();
-        let outgoing: f64 = (1..=n).map(|j| grid.get_u(n + 1, j) as f64).sum();
-        assert!((incoming - outgoing).abs() < incoming * 1e-4);
-        let original = grid.cells.clone();
-        for _ in 0..3 {
-            grid.project();
-        }
-        let change = grid
-            .cells
-            .iter()
-            .zip(&original)
-            .map(|(a, b)| {
-                (a.velocity_x - b.velocity_x)
-                    .abs()
-                    .max((a.velocity_y - b.velocity_y).abs())
-            })
-            .fold(0.0f32, f32::max);
-        assert!(change < 0.002, "repeated projection change {change}");
-        for i in 1..=n {
-            for j in 1..=n {
-                if grid.cells[grid.to_index(i, j)].wall {
-                    assert_eq!(grid.get_u(i, j), 0.0);
-                    assert_eq!(grid.get_u(i + 1, j), 0.0);
-                    assert_eq!(grid.get_v(i, j), 0.0);
-                    assert_eq!(grid.get_v(i, j + 1), 0.0);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn uniform_tunnel_survives_full_time_steps() {
-        let mut grid = Grid::new();
-        grid.realistic_wind = false;
-        for cell in &mut grid.cells {
-            cell.velocity_x = 1.0;
-        }
-        for _ in 0..3 {
-            grid.vel2_step(1.0);
-        }
-        assert!(grid.projection_converged);
-        assert!(divergence(&grid) < 0.02);
-        for i in 1..=N as usize {
-            for j in 1..=N as usize {
-                assert!((grid.get_u(i, j) - 1.0).abs() < 0.002);
-                assert!(grid.get_v(i, j).abs() < 0.002);
-            }
-        }
-    }
-
-    #[test]
-    fn incompatible_neumann_system_reports_failure() {
-        let (_, _, residual, converged) =
-            solve_pressure(&[[0; 4]], &[[0.0; 4]], &[0.0], &[1.0], 20, 1e-5, 1e-10);
-        assert!(!converged);
-        assert_eq!(residual, 1.0);
-    }
 }

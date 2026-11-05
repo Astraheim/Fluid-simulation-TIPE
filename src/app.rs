@@ -47,7 +47,7 @@ struct WaterlineOverlay {
 /// réappliquée chaque frame pour l'injection de densité/vitesse.
 #[derive(Clone, Copy, PartialEq)]
 enum ConfigKind {
-    /// Tunnel de vent classique (entrée gauche, sortie à pression imposée).
+    /// Tunnel de vent classique (coffre gauche percé, flux horizontal).
     ClassicFlow,
     /// Source circulaire (radiale ou tourbillonnante) au centre de la grille.
     CenterSource,
@@ -60,7 +60,6 @@ enum ConfigKind {
 struct ScenarioUiState {
     shape: ShapeKind,
     shape_size: f32,
-    shape_x: f32,
     config: ConfigKind,
     center_source_radial: bool,
 }
@@ -70,7 +69,6 @@ impl Default for ScenarioUiState {
         Self {
             shape: ShapeKind::None,
             shape_size: 40.0,
-            shape_x: N * 0.5,
             config: ConfigKind::ClassicFlow,
             center_source_radial: true,
         }
@@ -306,16 +304,24 @@ fn boat_waterline_overlay(boat_ui: &BoatUiState) -> WaterlineOverlay {
     }
 }
 
-fn tunnel_hole_positions_for_waterline(waterline: WaterlineOverlay) -> Vec<usize> {
-    let half = (waterline.thickness as isize) / 2;
-    let band_start = (waterline.y_center.round() as isize - half).clamp(2, N as isize - 1) as usize;
-    let holes: Vec<usize> = (1..=N as usize)
-        .filter(|&j| j % FLOW_SPACE == 0 && j < band_start)
-        .collect();
-    if holes.is_empty() {
-        (1..=N as usize).filter(|&j| j % FLOW_SPACE == 0).collect()
-    } else {
-        holes
+fn tunnel_hole_positions() -> Vec<usize> {
+    (1..=N as usize).filter(|j| j % FLOW_SPACE == 0).collect()
+}
+
+fn inject_tunnel_wind(grid: &mut Grid, density: f32, flow_velocity: f32) {
+    let left_wall = 1;
+    let box_width = (N as usize / 30).max(2);
+    let right_wall = left_wall + box_width;
+
+    for i in (left_wall + 2)..=right_wall.saturating_sub(5) {
+        for j in 1..=N as usize {
+            let idx = grid.to_index(i, j);
+            if grid.cells[idx].wall {
+                continue;
+            }
+            let wf = grid.inlet_profile_factor(j);
+            grid.cell_init(i, j, flow_velocity * wf, 0.0, if wf > 0.0 { density } else { 0.0 });
+        }
     }
 }
 
@@ -555,10 +561,9 @@ fn stamp_wall(grid: &mut Grid, cx: usize, cy: usize, pen_size: usize) {
     }
 }
 
-/// Place la forme à la distance horizontale choisie (au redémarrage).
-fn apply_shape(grid: &mut Grid, shape: ShapeKind, size: f32, x: f32) {
-    let margin = size.ceil() + 1.0;
-    let cx = x.clamp(margin, N - margin) as isize;
+/// Applique la forme choisie au centre de la grille (utilisé au redémarrage).
+fn apply_shape(grid: &mut Grid, shape: ShapeKind, size: f32) {
+    let cx = N as isize / 2;
     let cy = N as isize / 2;
     match shape {
         ShapeKind::None => {}
@@ -572,9 +577,10 @@ fn apply_shape(grid: &mut Grid, shape: ShapeKind, size: f32, x: f32) {
 /// (Ré)initialise une grille selon la configuration choisie (murs fixes
 /// posés une seule fois ici ; l'injection continue est gérée à chaque frame
 /// dans la boucle principale, voir `inject_for_config`).
-fn setup_config(grid: &mut Grid, config: ConfigKind, _hole_pos: &[usize], water_level: f32) {
+fn setup_config(grid: &mut Grid, config: ConfigKind, hole_pos: &[usize], water_level: f32) {
     match config {
         ConfigKind::ClassicFlow => {
+            grid.setup_wind_tunnel_walls(hole_pos);
             grid.init_water(water_level);
         }
         ConfigKind::CenterSource => {
@@ -595,7 +601,7 @@ fn inject_for_config(grid: &mut Grid, config: ConfigKind, params: &SimParams, sc
     grid.realistic_wind = params.realistic_wind;
     match config {
         ConfigKind::ClassicFlow => {
-            grid.inject_wind_tunnel_flow(params.flow_density, params.flow_velocity);
+            inject_tunnel_wind(grid, params.flow_density, params.flow_velocity);
         }
         ConfigKind::CenterSource => {
             grid.center_source(
@@ -612,7 +618,7 @@ fn inject_for_config(grid: &mut Grid, config: ConfigKind, params: &SimParams, sc
             for j in 1..=(N as usize) {
                 let idx = grid.to_index(1, j);
                 if !grid.cells[idx].wall {
-                    grid.cell_init(1, j, params.flow_velocity * wind_profile_factor(j), 0.0, params.flow_density);
+                    grid.cell_init(1, j, params.flow_velocity * grid.inlet_profile_factor(j), 0.0, params.flow_density);
                 }
             }
         }
@@ -660,7 +666,7 @@ pub fn run_app(mut grid: Grid) -> ! {
 
     let initial_waterline = boat_waterline_overlay(&boat_ui);
     let mut active_waterline = initial_waterline;
-    let hole_pos = tunnel_hole_positions_for_waterline(initial_waterline);
+    let hole_pos = tunnel_hole_positions();
 
     // Configuration initiale (par défaut : tunnel de vent classique), murs
     // fixes posés une seule fois ici.
@@ -765,7 +771,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         if scenario.config == ConfigKind::ClassicFlow {
                                             ui.add(egui::Slider::new(&mut params.wind_min_height, 0.0..=N)
                                                 .text("Hauteur minimale du vent (cellules)"));
-                                            ui.small("Depuis le bas : 0 = toute la hauteur, maximum = entrée coupée.");
+                                            ui.small("Depuis le bas : 0 = toute la hauteur, maximum = injection coupée.");
                                         }
                                         if ui.selectable_label(params.realistic_wind, "Profil réaliste du vent").clicked() {
                                             params.realistic_wind = !params.realistic_wind;
@@ -815,11 +821,6 @@ pub fn run_app(mut grid: Grid) -> ! {
                                 let fps = if last_tick_ms > 0.0 { 1000.0 / last_tick_ms } else { 0.0 };
                                 ui.label(format!("Step: {step}  |  t: {:.1}s", start.elapsed().as_secs_f32()));
                                 ui.label(format!("Temps/tick: {:.2} ms  |  FPS (calcul): {:.1}", last_tick_ms, fps));
-                                ui.label(format!("Poisson : {} itérations, résidu {:.2e}",
-                                    grid.projection_iterations, grid.projection_residual));
-                                if !grid.projection_converged {
-                                    ui.colored_label(egui::Color32::RED, "Poisson non convergé : vérifier le domaine et les débits.");
-                                }
                                 egui_plot::Plot::new("tick_ms_plot").height(100.0).show(ui, |plot_ui| {
                                     plot_ui.line(
                                         egui_plot::Line::new(egui_plot::PlotPoints::from(tick_history.points.clone()))
@@ -829,7 +830,7 @@ pub fn run_app(mut grid: Grid) -> ! {
 
                                 ui.separator();
                                 ui.collapsing("Scénario / Réinitialisation", |ui| {
-                                    ui.label("Forme à placer (appliquée au redémarrage)");
+                                    ui.label("Forme à placer au centre");
                                     egui::ComboBox::from_label("Forme")
                                         .selected_text(match scenario.shape {
                                             ShapeKind::None => "Aucune",
@@ -847,13 +848,8 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         });
                                     ui.add_enabled(
                                         scenario.shape != ShapeKind::None,
-                                        egui::Slider::new(&mut scenario.shape_size, 4.0..=(N * 0.5 - 2.0)).text("Taille de la forme"),
+                                        egui::Slider::new(&mut scenario.shape_size, 4.0..=(N * 0.5)).text("Taille de la forme"),
                                     );
-                                    let margin = scenario.shape_size.ceil() + 1.0;
-                                    scenario.shape_x = scenario.shape_x.clamp(margin, N - margin);
-                                    ui.add_enabled(scenario.shape != ShapeKind::None,
-                                        egui::Slider::new(&mut scenario.shape_x, margin..=(N - margin))
-                                            .text("Centre depuis la gauche (cellules)"));
 
                                     ui.separator();
                                     ui.label("Configuration du flux");
@@ -1055,10 +1051,10 @@ pub fn run_app(mut grid: Grid) -> ! {
                     // --- 2. Redémarrage "scénario" (forme + configuration de flux) ---
                     if do_restart {
                         active_waterline = boat_waterline_overlay(&boat_ui);
-                        let hole_pos = tunnel_hole_positions_for_waterline(active_waterline);
+                        let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
                         boat_labels.clear();
-                        apply_shape(&mut grid, scenario.shape, scenario.shape_size, scenario.shape_x);
+                        apply_shape(&mut grid, scenario.shape, scenario.shape_size);
                         setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
                         history.clear();
                         step = 0;
@@ -1102,7 +1098,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let boat_params = boat_params_from_ui(&boat_ui);
                         let layout = build_boat_layout("custom", &boat_params);
                         active_waterline = boat_waterline_overlay(&boat_ui);
-                        let hole_pos = tunnel_hole_positions_for_waterline(active_waterline);
+                        let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
                         boat_labels = grid.apply_layout_with_profile(&layout, &boat_ui.side_profile);
                         // La grille vient d'être recréée : il faut reposer les
@@ -1117,7 +1113,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let mut rng = rand::rng();
                         let layout = random_layout("alea_apercu", &base_params, &mut rng);
                         active_waterline = boat_waterline_overlay(&boat_ui);
-                        let hole_pos = tunnel_hole_positions_for_waterline(active_waterline);
+                        let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
                         boat_labels = grid.apply_layout_with_profile(&layout, &boat_ui.side_profile);
                         setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);

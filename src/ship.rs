@@ -371,10 +371,20 @@ impl Grid {
 pub fn test_layout(layout: &ShipLayout, steps: usize, hole_pos: &[usize]) -> LayoutResult {
     let mut grid = Grid::new();
     let labels = grid.apply_layout(layout);
+    grid.setup_wind_tunnel_walls(hole_pos);
     let max_hole_row = hole_pos.iter().copied().max().unwrap_or(N as usize);
-    grid.wind_min_height = N - max_hole_row as f32;
     for _ in 0..steps {
-        grid.inject_wind_tunnel_flow(FLOW_DENSITY, FLOW_VELOCITY);
+        let left_wall = 1;
+        let box_width = (N as usize / 30).max(2);
+        let right_wall = left_wall + box_width;
+        for i in (left_wall + 2)..=right_wall.saturating_sub(5) {
+            for j in 2..max_hole_row {
+                let idx = grid.to_index(i, j);
+                if grid.cells[idx].wall { continue; }
+                let wf = wind_profile_factor(j);
+                grid.cell_init(i, j, FLOW_VELOCITY * wf, 0.0, FLOW_DENSITY);
+            }
+        }
         grid.vel2_step(FLOW_VELOCITY);
     }
     let cell_forces = grid.compute_wall_forces();
