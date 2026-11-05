@@ -603,6 +603,7 @@ impl Grid {
     /// Project the velocity field to ensure incompressibility
     // Modification of project to work with staggered grid and walls
     pub fn project(&mut self) {
+        self.enforce_solid_faces();
         let h = 1.0 / N;
         let mut pressure = vec![0.0; SIZE as usize];
         let mut div = vec![0.0; SIZE as usize];
@@ -735,60 +736,60 @@ impl Grid {
             }
         }
 
-        // Appliquer le gradient de pression pour corriger les vitesses, pondéré
-        // par l'inverse de la densité locale à chaque face en mode eau — sans
-        // cette pondération, un même gradient de pression déplace l'eau aussi
-        // facilement que l'air ("elle s'envole comme de la fumée"), et
-        // l'incohérence avec l'opérateur pondéré utilisé pour résoudre la pression
-        // (ci-dessus) produit des stries numériques exactement à l'interface eau/air.
-        for i in 1..=(N as usize + 1) {
-            for j in 1..=(N as usize) {
-                let idx = self.to_index(i, j);
-                if !self.cells[idx].wall {
-                    let p_left = if i > 1 {
-                        pressure[self.to_index(i-1, j)]
-                    } else {
-                        pressure[idx]
-                    };
-                    let p_right = pressure[idx];
-
-                    let w_face = if ENABLE_WATER {
-                        let rho_right = self.local_rho(idx);
-                        let rho_left = if i > 1 {
-                            self.local_rho(self.to_index(i-1, j))
-                        } else {
-                            rho_right
-                        };
-                        2.0 / (rho_left + rho_right)
-                    } else {
-                        1.0
-                    };
-
-                    self.cells[idx].velocity_x -= w_face * (p_right - p_left) / h;
+        // Le Poisson utilise une réflexion (gradient normal nul) aux murs
+        // et au contour. Corriger uniquement les faces fluide-fluide internes.
+        for i in 2..=N as usize {
+            for j in 1..=N as usize {
+                let right = self.to_index(i, j);
+                let left = self.to_index(i - 1, j);
+                if self.cells[left].wall || self.cells[right].wall {
+                    continue;
                 }
+                let weight = if ENABLE_WATER {
+                    w_l_arr[right]
+                } else {
+                    1.0
+                };
+                self.cells[right].velocity_x -=
+                    weight * (pressure[right] - pressure[left]) / h;
+            }
+        }
+        for i in 1..=N as usize {
+            for j in 2..=N as usize {
+                let top = self.to_index(i, j);
+                let bottom = self.to_index(i, j - 1);
+                if self.cells[bottom].wall || self.cells[top].wall {
+                    continue;
+                }
+                let weight = if ENABLE_WATER {
+                    w_b_arr[top]
+                } else {
+                    1.0
+                };
+                self.cells[top].velocity_y -=
+                    weight * (pressure[top] - pressure[bottom]) / h;
+            }
+        }
+    }
 
-                let idx = self.to_index(i, j);
-                if !self.cells[idx].wall {
-                    let p_bottom = if j > 1 {
-                        pressure[self.to_index(i, j-1)]
-                    } else {
-                        pressure[idx]
-                    };
-                    let p_top = pressure[idx];
-
-                    let w_face = if ENABLE_WATER {
-                        let rho_top = self.local_rho(idx);
-                        let rho_bottom = if j > 1 {
-                            self.local_rho(self.to_index(i, j-1))
-                        } else {
-                            rho_top
-                        };
-                        2.0 / (rho_bottom + rho_top)
-                    } else {
-                        1.0
-                    };
-
-                    self.cells[idx].velocity_y -= w_face * (p_top - p_bottom) / h;
+    /// Annule le flux normal sur les deux côtés de chaque cellule solide.
+    fn enforce_solid_faces(&mut self) {
+        let n = N as usize;
+        for i in 1..=n + 1 {
+            for j in 1..=n {
+                let right = self.to_index(i, j);
+                let left = self.to_index(i - 1, j);
+                if self.cells[left].wall || self.cells[right].wall {
+                    self.cells[right].velocity_x = 0.0;
+                }
+            }
+        }
+        for i in 1..=n {
+            for j in 1..=n + 1 {
+                let top = self.to_index(i, j);
+                let bottom = self.to_index(i, j - 1);
+                if self.cells[bottom].wall || self.cells[top].wall {
+                    self.cells[top].velocity_y = 0.0;
                 }
             }
         }
@@ -868,6 +869,7 @@ impl Grid {
             self.set_u(n+1, n, self.get_u(n, n));
             self.set_v(n, n+1, 0.0);
         }
+        self.enforce_solid_faces();
     }
 
 
