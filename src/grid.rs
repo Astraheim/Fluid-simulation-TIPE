@@ -346,7 +346,8 @@ impl Grid {
 
                 // Backtracking + clamp aux frontières
                 let x = (pos_x - dt0 * u_center).clamp(0.5, N + 0.5);
-                let y = (pos_y - dt0 * v_center).clamp(0.5, N + 0.5);
+                // Convertir la position physique en indices du tableau u.
+                let y = (pos_y - dt0 * v_center - 0.5).clamp(0.5, N + 0.5);
 
                 let i0 = x.floor() as usize;
                 let i1 = i0 + 1;
@@ -397,7 +398,8 @@ impl Grid {
                 let u_se = self.get_u(i + 1, j);
                 let u_center = 0.25 * (u_nw + u_ne + u_sw + u_se);
 
-                let x = (pos_x - dt0 * u_center).clamp(0.5, N + 0.5);
+                // Convertir la position physique en indices du tableau v.
+                let x = (pos_x - dt0 * u_center - 0.5).clamp(0.5, N + 0.5);
                 let y = (pos_y - dt0 * v_center).clamp(0.5, N + 0.5);
 
                 let i0 = x.floor() as usize;
