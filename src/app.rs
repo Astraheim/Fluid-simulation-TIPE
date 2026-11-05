@@ -60,6 +60,7 @@ enum ConfigKind {
 struct ScenarioUiState {
     shape: ShapeKind,
     shape_size: f32,
+    shape_x: f32,
     config: ConfigKind,
     center_source_radial: bool,
 }
@@ -69,6 +70,7 @@ impl Default for ScenarioUiState {
         Self {
             shape: ShapeKind::None,
             shape_size: 40.0,
+            shape_x: N * 0.5,
             config: ConfigKind::ClassicFlow,
             center_source_radial: true,
         }
@@ -561,9 +563,19 @@ fn stamp_wall(grid: &mut Grid, cx: usize, cy: usize, pen_size: usize) {
     }
 }
 
-/// Applique la forme choisie au centre de la grille (utilisé au redémarrage).
-fn apply_shape(grid: &mut Grid, shape: ShapeKind, size: f32) {
-    let cx = N as isize / 2;
+/// Demi-largeur maximale de la forme discrétisée, avec une cellule de marge.
+fn shape_margin(shape: ShapeKind, size: f32) -> f32 {
+    let half_width = match shape {
+        ShapeKind::Triangle => size,
+        _ => size * 0.5,
+    };
+    (half_width.ceil() + 1.0).min(N * 0.5)
+}
+
+/// Place la forme à la distance horizontale choisie, au redémarrage.
+fn apply_shape(grid: &mut Grid, shape: ShapeKind, size: f32, x: f32) {
+    let margin = shape_margin(shape, size);
+    let cx = x.clamp(margin, N - margin).round() as isize;
     let cy = N as isize / 2;
     match shape {
         ShapeKind::None => {}
@@ -830,7 +842,7 @@ pub fn run_app(mut grid: Grid) -> ! {
 
                                 ui.separator();
                                 ui.collapsing("Scénario / Réinitialisation", |ui| {
-                                    ui.label("Forme à placer au centre");
+                                    ui.label("Forme à placer au redémarrage");
                                     egui::ComboBox::from_label("Forme")
                                         .selected_text(match scenario.shape {
                                             ShapeKind::None => "Aucune",
@@ -850,6 +862,11 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         scenario.shape != ShapeKind::None,
                                         egui::Slider::new(&mut scenario.shape_size, 4.0..=(N * 0.5)).text("Taille de la forme"),
                                     );
+                                    let margin = shape_margin(scenario.shape, scenario.shape_size);
+                                    scenario.shape_x = scenario.shape_x.clamp(margin, N - margin);
+                                    ui.add_enabled(scenario.shape != ShapeKind::None,
+                                        egui::Slider::new(&mut scenario.shape_x, margin..=(N - margin))
+                                            .text("Centre depuis la gauche (cellules)"));
 
                                     ui.separator();
                                     ui.label("Configuration du flux");
@@ -1054,7 +1071,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
                         boat_labels.clear();
-                        apply_shape(&mut grid, scenario.shape, scenario.shape_size);
+                        apply_shape(&mut grid, scenario.shape, scenario.shape_size, scenario.shape_x);
                         setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
                         history.clear();
                         step = 0;

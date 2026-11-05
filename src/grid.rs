@@ -322,6 +322,7 @@ impl Grid {
     // pour advect_density), donc on calcule les deux champs avec rayon plutôt
     // qu'avec une double boucle séquentielle.
     pub fn advect_velocity(&mut self, dt: f32) {
+        self.enforce_solid_faces();
         let dt0 = dt * N;
         let n = N as usize;
 
@@ -438,6 +439,7 @@ impl Grid {
         for (idx, value) in v_updates {
             self.cells[idx].velocity_y = value;
         }
+        self.enforce_solid_faces();
     }
 
 
@@ -776,7 +778,8 @@ impl Grid {
         }
     }
 
-    /// Annule le flux normal sur les deux côtés de chaque cellule solide.
+    /// Impose l’imperméabilité sur toute face adjacente à une cellule solide.
+    /// La vitesse tangentielle reste libre : l’adhérence nécessite un traitement visqueux.
     fn enforce_solid_faces(&mut self) {
         let n = N as usize;
         for i in 1..=n + 1 {
@@ -800,8 +803,7 @@ impl Grid {
     }
 
 
-    /// Impose u=0, v=0 in obstacles and walls, constant inflow on the left, outflow (∂/∂x=0) on the right and on the top/bottom
-    // Modification de apply_boundary_conditions pour une staggered grid
+    /// Facteur du profil de vent et coupure sous la hauteur choisie.
     pub fn inlet_profile_factor(&self, j: usize) -> f32 {
         if N - j as f32 + 0.5 < self.wind_min_height {
             0.0
@@ -812,6 +814,7 @@ impl Grid {
         }
     }
 
+    /// Applique les conditions extérieures, puis l’imperméabilité des solides.
     pub fn apply_boundary_conditions(&mut self, inflow_velocity: f32) {
         let n = N as usize;
 
@@ -827,13 +830,6 @@ impl Grid {
             // Sortie à droite (outflow): ∂u/∂x = 0
             self.set_u(n+1, j, self.get_u(n, j));
 
-            // Parois (no-slip)
-            for i in 1..=n+1 {
-                let idx = self.to_index(i, j);
-                if self.cells[idx].wall {
-                    self.set_u(i, j, 0.0);
-                }
-            }
         }
 
         // Conditions aux limites pour la vitesse verticale v
@@ -849,13 +845,6 @@ impl Grid {
                 self.set_v(i, n+1, self.get_v(i, n));
             }
 
-            // Parois (no-slip)
-            for j in 1..=n+1 {
-                let idx = self.to_index(i, j);
-                if self.cells[idx].wall {
-                    self.set_v(i, j, 0.0);
-                }
-            }
         }
 
         // Conditions spéciales aux coins
@@ -1294,4 +1283,63 @@ impl Grid {
 
 
 
+}
+
+#[cfg(test)]
+mod solid_face_tests {
+    use super::*;
+
+    fn obstacle_grid() -> Grid {
+        let mut grid = Grid::new();
+        for cell in &mut grid.cells {
+            cell.velocity_x = 1.0;
+            cell.velocity_y = 2.0;
+        }
+        let idx = grid.to_index(10, 10);
+        grid.cells[idx].wall = true;
+        grid
+    }
+
+    fn assert_impermeable(grid: &Grid) {
+        assert_eq!(grid.get_u(10, 10), 0.0);
+        assert_eq!(grid.get_u(11, 10), 0.0);
+        assert_eq!(grid.get_v(10, 10), 0.0);
+        assert_eq!(grid.get_v(10, 11), 0.0);
+    }
+
+    #[test]
+    fn solid_faces_are_zero_but_tangential_velocities_are_preserved() {
+        let mut grid = obstacle_grid();
+        grid.enforce_solid_faces();
+        assert_impermeable(&grid);
+        assert_eq!(grid.get_u(10, 9), 1.0);
+        assert_eq!(grid.get_u(10, 11), 1.0);
+        assert_eq!(grid.get_v(9, 10), 2.0);
+        assert_eq!(grid.get_v(11, 10), 2.0);
+    }
+
+    #[test]
+    fn advection_keeps_all_four_obstacle_faces_closed() {
+        let mut grid = obstacle_grid();
+        for _ in 0..3 {
+            grid.advect_velocity(0.25 / N);
+            assert_impermeable(&grid);
+        }
+    }
+
+    #[test]
+    fn boundary_conditions_keep_obstacle_and_domain_faces_closed() {
+        let mut grid = obstacle_grid();
+        let n = N as usize;
+        for (i, j) in [(0, 5), (n + 1, 5), (5, 0), (5, n + 1)] {
+            let idx = grid.to_index(i, j);
+            grid.cells[idx].wall = true;
+        }
+        grid.apply_boundary_conditions(3.0);
+        assert_impermeable(&grid);
+        assert_eq!(grid.get_u(1, 5), 0.0);
+        assert_eq!(grid.get_u(n + 1, 5), 0.0);
+        assert_eq!(grid.get_v(5, 1), 0.0);
+        assert_eq!(grid.get_v(5, n + 1), 0.0);
+    }
 }
