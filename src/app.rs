@@ -932,7 +932,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         .default_open(false).show(ui, |ui| {
                                         ui.add(egui::Slider::new(&mut boat_ui.container_width, 2.0..=100.0).text("Largeur conteneur"));
                                         ui.add(egui::Slider::new(&mut boat_ui.container_height, 2.0..=100.0).text("Hauteur conteneur"));
-                                        ui.add(egui::Slider::new(&mut boat_ui.container_gap, 0.0..=40.0).text("Espacement"));
+                                        ui.add(egui::Slider::new(&mut boat_ui.container_gap, 0.0..=40.0).text("Espacement horizontal des travées"));
                                         egui::ComboBox::from_label("Organisation")
                                             .selected_text(match boat_ui.kind_index { 0 => "Grille", 1 => "Pyramide", _ => "Quinconce" })
                                             .show_ui(ui, |ui| {

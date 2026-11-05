@@ -438,6 +438,7 @@ pub struct BoatParams {
     pub hull_height: f32,
     pub container_width: f32,
     pub container_height: f32,
+    /// Espacement horizontal entre les travées, en cellules.
     pub container_gap: f32,
     pub kind: ContainerLayoutKind,
     pub flow_angle: f32,
@@ -470,12 +471,13 @@ pub fn build_boat_layout(name: &str, p: &BoatParams) -> ShipLayout {
     let mut id = 0usize;
     let top = p.center.1 - (p.hull_height / 2.0) as isize;
     let step_x = p.container_width + p.container_gap;
-    let step_y = p.container_height + p.container_gap;
+    // Les centres sont entiers : un pas entier évite les trous dus aux arrondis.
+    let step_y = p.container_height as isize;
     let push_row = |row: usize, ncols: usize, offset: f32, containers: &mut Vec<Container>, id: &mut usize| {
         let total = ncols as f32 * step_x - p.container_gap;
         let start = p.center.0 - (total / 2.0) as isize + offset as isize;
         let cy = top - (p.container_height / 2.0) as isize
-            - (row as f32 * (p.container_height + p.container_gap)) as isize;
+            - row as isize * step_y;
         for c in 0..ncols {
             containers.push(Container { id: *id,
                 center: (start + (c as f32 * step_x + p.container_width / 2.0) as isize, cy),
