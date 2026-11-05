@@ -148,7 +148,10 @@ impl Grid {
         let first = y0.min(y1).ceil().max(0.0) as isize;
         let last = y0.max(y1).floor().min(N - 1.0) as isize;
         for y in first..=last {
-            self.wall_init(y as usize, x as usize, true);
+            let idx = self.to_index(x as usize, y as usize);
+            if !self.cells[idx].wall {
+                self.wall_init(y as usize, x as usize, true);
+            }
         }
     }
 
@@ -202,13 +205,12 @@ impl Grid {
                 height * settings.forecastle_rise.clamp(0.0, 0.8) * smoothstep(progress)
             } else { 0.0 };
             let top = deck_y - rise;
-            // L'étrave rejoint la ligne de flottaison en progressant vers l'avant.
-            // Quand rake=0, la silhouette devient courte et presque verticale.
-            // Quand rake=1, l'obliquité s'étend sur toute la longueur indiquée.
-            let bottom_factor = if rake < 0.001 {
-                if t < 0.94 { 1.0 } else { ((1.0 - t) / 0.06).clamp(0.0, 1.0) }
+            // Le contour rejoint l’extrémité immergée à la flottaison.
+            let waterline_fraction = 1.0 - 0.45 * rake;
+            let bottom_factor = if t <= waterline_fraction {
+                1.0
             } else {
-                (1.0 - t.powf(exponent / rake.max(0.1))).clamp(0.0, 1.0)
+                ((1.0 - t) / (1.0 - waterline_fraction)).powf(exponent)
             };
             let bottom = top + (waterline_y - top) * bottom_factor;
             self.fill_vertical(x, top, bottom);
@@ -283,20 +285,6 @@ impl Grid {
         let band_center = waterline_y.round() as isize;
         let band_start = (band_center - band_thickness / 2).max(0);
         let band_end = (band_start + band_thickness - 1).min(N as isize - 1);
-        for y in band_start..=band_end {
-            for x in 0..(N as isize) {
-                self.wall_init(y as usize, x as usize, true);
-            }
-        }
-        for y in band_start..=band_end {
-            for x in 0..(N as usize) {
-                let idx = self.to_index(x, y as usize);
-                if idx < self.cells.len() && self.cells[idx].wall {
-                    labels.insert(idx, WallKind::Water);
-                }
-            }
-        }
-
         // Corps principal : on sépare désormais la partie émergée et la carène
         // sous-marine pour obtenir une silhouette plus réaliste en vue de côté.
         let draft = (main_height * (1.0 - settings.freeboard_ratio.clamp(0.05, 0.95))).max(2.0);
@@ -324,7 +312,8 @@ impl Grid {
                 let base = main_center.0 - half_w;
                 let tip = base - curve.bow_length as isize;
                 self.stamp_side_hull_end(base, tip, deck_y, waterline_y, true, settings);
-                self.stamp_underwater_end(base, tip, waterline_y, draft, true);
+                let submerged_tip = base - (curve.bow_length * (1.0 - 0.45 * settings.bow_rake.clamp(0.0, 1.0))) as isize;
+                self.stamp_underwater_end(base, submerged_tip, waterline_y, draft, true);
                 for (idx, cell) in self.cells.iter().enumerate() {
                     if cell.wall && !before.contains(&idx) && !labels.contains_key(&idx) {
                         labels.insert(idx, WallKind::BowHull);
@@ -336,7 +325,8 @@ impl Grid {
                 let base = main_center.0 + half_w;
                 let tip = base + curve.stern_length as isize;
                 self.stamp_side_hull_end(base, tip, deck_y, waterline_y, false, settings);
-                self.stamp_underwater_end(base, tip, waterline_y, draft * 0.92, false);
+                let submerged_tip = base + (curve.stern_length * (1.0 - 0.45 * settings.stern_rake.clamp(0.0, 1.0))) as isize;
+                self.stamp_underwater_end(base, submerged_tip, waterline_y, draft, false);
                 for (idx, cell) in self.cells.iter().enumerate() {
                     if cell.wall && !before.contains(&idx) && !labels.contains_key(&idx) {
                         labels.insert(idx, WallKind::SternHull);
@@ -361,6 +351,16 @@ impl Grid {
                         FairingSide::Bow => WallKind::BowFairing,
                         FairingSide::Stern => WallKind::SternFairing,
                     });
+                }
+            }
+        }
+        // Poser l’eau autour de la géométrie, pour garder la coque continue.
+        for y in band_start..=band_end {
+            for x in 0..N as usize {
+                let idx = self.to_index(x, y as usize);
+                if !self.cells[idx].wall {
+                    self.wall_init(y as usize, x, true);
+                    labels.insert(idx, WallKind::Water);
                 }
             }
         }
@@ -595,4 +595,159 @@ pub fn random_layout(name: &str, base: &BoatParams, rng: &mut impl Rng) -> ShipL
 pub fn random_variants(base: BoatParams, n: usize) -> Vec<ShipLayout> {
     let mut rng = rand::rng();
     (0..n).map(|i| random_layout(&format!("alea_{i}"), &base, &mut rng)).collect()
+}
+
+/// Silhouette inspirée de la référence « Full load: Case A » fournie.
+/// Les proportions sont estimées sur l’image. La carène immergée est inventée.
+pub fn build_biblio_layout() -> (ShipLayout, SideProfileSettings) {
+    let center = ((N * 0.54) as isize, (N * 0.5) as isize);
+    let width = N * 0.69;
+    let height = N * 0.075;
+    let bow_length = N * 0.09;
+    let stern_length = N * 0.025;
+    let length = width + bow_length + stern_length;
+    let left = center.0 as f32 - width / 2.0 - bow_length;
+    let deck = center.1 as f32 - height / 2.0;
+    let scale = length / 1830.0;
+    let settings = SideProfileSettings {
+        freeboard_ratio: 0.38,
+        bow_rake: 0.70,
+        bow_exponent: 1.0,
+        forecastle_rise: 0.0,
+        stern_rake: 0.10,
+        stern_exponent: 1.3,
+        ..SideProfileSettings::default()
+    };
+    let mut layout = ShipLayout {
+        name: "Bateau biblio".to_string(),
+        hull_rects: vec![(center, width, height)],
+        hull_curve: Some(HullCurveSpec {
+            curve_bow: true,
+            curve_stern: true,
+            curvature: 0.6,
+            bow_length,
+            stern_length,
+        }),
+        containers: Vec::new(),
+        fairings: Vec::new(),
+        flow_angle: 0.0,
+    };
+    // Travées de gauche à droite : 3, 3, 4, 4, 4, 5, 5 et 6 niveaux.
+    let bays = [
+        (0.134, 0.176, 1, 3),
+        (0.213, 0.297, 2, 3),
+        (0.302, 0.386, 2, 4),
+        (0.423, 0.507, 2, 4),
+        (0.512, 0.596, 2, 4),
+        (0.600, 0.684, 2, 5),
+        (0.688, 0.772, 2, 5),
+        (0.804, 0.888, 2, 6),
+    ];
+    let tier_height = (32.0 * scale).round().max(2.0);
+    for (start, end, columns, tiers) in bays {
+        let bay_left = left + start * length;
+        let bay_width = (end - start) * length;
+        let platform = if start < 0.8 {
+            (32.0 * scale).round()
+        } else {
+            0.0
+        };
+        if platform > 0.0 {
+            layout.hull_rects.push((
+                (
+                    (bay_left + bay_width / 2.0).round() as isize,
+                    (deck - platform / 2.0).round() as isize,
+                ),
+                bay_width + 2.0,
+                platform,
+            ));
+        }
+        for row in 0..tiers {
+            for column in 0..columns {
+                layout.containers.push(Container {
+                    id: layout.containers.len(),
+                    center: (
+                        (bay_left + (column as f32 + 0.5) * bay_width / columns as f32).round()
+                            as isize,
+                        (deck - platform - tier_height * (row as f32 + 0.5)).round() as isize,
+                    ),
+                    width: bay_width / columns as f32,
+                    height: tier_height,
+                });
+            }
+        }
+    }
+    // Gaillard avant et château arrière étagé, cheminée comprise.
+    for (start, end, rise) in [
+        (0.015, 0.105, 56.0),
+        (0.89, 1.0, 40.0),
+        (0.89, 0.965, 210.0),
+        (0.885, 0.975, 216.0),
+        (0.94, 0.965, 290.0),
+    ] {
+        let h = rise * scale;
+        layout.hull_rects.push((
+            (
+                (left + (start + end) * length / 2.0).round() as isize,
+                (deck - h / 2.0).round() as isize,
+            ),
+            (end - start) * length,
+            h,
+        ));
+    }
+    (layout, settings)
+}
+
+#[cfg(test)]
+mod boat_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn biblio_matches_reference_tiers_and_has_a_continuous_hull() {
+        let (layout, profile) = build_biblio_layout();
+        assert_eq!(layout.containers.len(), 65);
+        let mut grid = Grid::new();
+        let labels = grid.apply_layout_with_profile(&layout, &profile);
+        for x in 1..N as usize {
+            let hull_rows: Vec<usize> = (1..N as usize)
+                .filter(|&y| {
+                    matches!(
+                        labels.get(&grid.to_index(x, y)),
+                        Some(WallKind::Hull | WallKind::BowHull | WallKind::SternHull)
+                    )
+                })
+                .collect();
+            if let (Some(&first), Some(&last)) = (hull_rows.first(), hull_rows.last()) {
+                for y in first..=last {
+                    let idx = grid.to_index(x, y);
+                    assert!(grid.cells[idx].wall, "trou en ({x}, {y})");
+                    assert_ne!(labels.get(&idx), Some(&WallKind::Water));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hull_ends_join_above_and_below_water_for_all_rakes() {
+        for rake in [0.0, 0.3, 0.74, 1.0] {
+            let mut grid = Grid::new();
+            let settings = SideProfileSettings {
+                bow_rake: rake,
+                ..SideProfileSettings::default()
+            };
+            let base = 100;
+            let tip = 60;
+            let submerged_tip = base - (40.0 * (1.0 - 0.45 * rake)) as isize;
+            grid.stamp_side_hull_end(base, tip, 100.0, 120.0, true, &settings);
+            grid.stamp_underwater_end(base, submerged_tip, 120.0, 30.0, true);
+            for x in submerged_tip..=base {
+                for y in 100..=121 {
+                    assert!(
+                        grid.cells[grid.to_index(x as usize, y)].wall,
+                        "raccord interrompu en ({x}, {y}), rake={rake}"
+                    );
+                }
+            }
+        }
+    }
 }

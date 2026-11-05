@@ -1,6 +1,6 @@
 use crate::conditions::*;
 use crate::grid::{Grid, ObjectForce};
-use crate::ship::{build_boat_layout, random_layout, BoatParams, ContainerLayoutKind, FairingProfile, SideProfileSettings, WallKind};
+use crate::ship::{build_biblio_layout, build_boat_layout, random_layout, BoatParams, ContainerLayoutKind, FairingProfile, SideProfileSettings, WallKind};
 use egui::Context;
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use pixels::{Pixels, SurfaceTexture};
@@ -83,9 +83,6 @@ pub struct SimParams {
     pub wind_min_height: f32,
     pub realistic_wind: bool,
     pub flow_density: f32,
-    pub viscosity: f32,
-    pub w_drag: f32,
-    pub w_torque: f32,
     pub paused: bool,
     pub pen_size: usize,
     pub straight_line_mode: bool,
@@ -109,9 +106,6 @@ impl Default for SimParams {
             wind_min_height: 0.0,
             realistic_wind: true,
             flow_density: FLOW_DENSITY,
-            viscosity: VISCOSITY,
-            w_drag: 1.0,
-            w_torque: 1.0,
             paused: false,
             pen_size: 1,
             straight_line_mode: false,
@@ -194,6 +188,7 @@ impl TickHistory {
 
 /// État des champs du panneau "Générateur de bateau".
 struct BoatUiState {
+    biblio: bool,
     hull_width: f32,
     hull_height: f32,
     container_width: f32,
@@ -230,6 +225,7 @@ struct BoatUiState {
 impl Default for BoatUiState {
     fn default() -> Self {
         Self {
+            biblio: false,
             hull_width: 120.0,
             hull_height: 30.0,
             container_width: 10.0,
@@ -513,7 +509,7 @@ fn draw_grid(grid: &Grid, frame: &mut [u8], grid_w: usize, mode: DisplayMode, vo
 /// Hélice purement graphique, dessinée sous l'eau près de la poupe.
 /// Elle n'ajoute pas de murs au solveur aérodynamique.
 fn draw_propeller(frame: &mut [u8], grid_w: usize, boat: &BoatUiState) {
-    if !boat.curve_stern { return; }
+    if boat.biblio || !boat.curve_stern { return; }
     let deck = N as f32 / 2.0 - boat.hull_height / 2.0;
     let waterline = deck + boat.hull_height * boat.side_profile.freeboard_ratio;
     let draft = boat.hull_height * (1.0 - boat.side_profile.freeboard_ratio);
@@ -790,9 +786,6 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         }
                                         ui.small(if params.realistic_wind { "Profil vertical configuré actif" } else { "Vent uniforme" });
                                         ui.add(egui::Slider::new(&mut params.flow_density, 0.0..=50.0).text("Densité du flux"));
-                                        ui.add(egui::Slider::new(&mut params.viscosity, 0.0..=0.01).text("Viscosité (réglage)"));
-                                        ui.add(egui::Slider::new(&mut params.w_drag, 0.0..=5.0).text("Poids traînée"));
-                                        ui.add(egui::Slider::new(&mut params.w_torque, 0.0..=5.0).text("Poids couple"));
                                     });
                                 egui::CollapsingHeader::new("Champ affiché")
                                     .default_open(false).show(ui, |ui| {
@@ -894,6 +887,13 @@ pub fn run_app(mut grid: Grid) -> ! {
                                 ui.separator();
                                 egui::CollapsingHeader::new("Générateur de bateau")
                                     .default_open(true).show(ui, |ui| {
+                                    if ui.checkbox(&mut boat_ui.biblio, "Bateau biblio").changed() {
+                                        apply_boat = true;
+                                    }
+                                    if boat_ui.biblio {
+                                        ui.small("Silhouette Full load — Case A. Carène immergée imaginée.");
+                                    }
+                                    ui.add_enabled_ui(!boat_ui.biblio, |ui| {
                                     egui::CollapsingHeader::new("Coque et ligne d'eau")
                                         .default_open(true).show(ui, |ui| {
                                         ui.add(egui::Slider::new(&mut boat_ui.hull_width, 5.0..=(N * 0.9)).text("Longueur corps central"));
@@ -979,6 +979,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                                 });
                                         });
                                         ui.small("Profils disponibles : triangulaire, arrondi, parabolique, étagé, capot supérieur, voile/rampe et arc courbe.");
+                                    });
                                     });
                                     egui::CollapsingHeader::new("Couleurs / visualisation")
                                         .default_open(false).show(ui, |ui| {
@@ -1067,6 +1068,7 @@ pub fn run_app(mut grid: Grid) -> ! {
 
                     // --- 2. Redémarrage "scénario" (forme + configuration de flux) ---
                     if do_restart {
+                        boat_ui.biblio = false;
                         active_waterline = boat_waterline_overlay(&boat_ui);
                         let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
@@ -1113,11 +1115,21 @@ pub fn run_app(mut grid: Grid) -> ! {
 
                     if apply_boat {
                         let boat_params = boat_params_from_ui(&boat_ui);
-                        let layout = build_boat_layout("custom", &boat_params);
-                        active_waterline = boat_waterline_overlay(&boat_ui);
+                        let (layout, profile) = if boat_ui.biblio {
+                            build_biblio_layout()
+                        } else {
+                            (build_boat_layout("custom", &boat_params), boat_ui.side_profile)
+                        };
+                        let (center, _, height) = layout.hull_rects[0];
+                        active_waterline = WaterlineOverlay {
+                            y_center: center.1 as f32 - height / 2.0 + height * profile.freeboard_ratio,
+                            thickness: profile.waterline_thickness,
+                        };
+                        params.wind_min_height = 260.0_f32.min(N);
+                        scenario.config = ConfigKind::ClassicFlow;
                         let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
-                        boat_labels = grid.apply_layout_with_profile(&layout, &boat_ui.side_profile);
+                        boat_labels = grid.apply_layout_with_profile(&layout, &profile);
                         // La grille vient d'être recréée : il faut reposer les
                         // murs de la configuration active une fois.
                         setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
@@ -1126,6 +1138,9 @@ pub fn run_app(mut grid: Grid) -> ! {
                     }
 
                     if apply_random_boat {
+                        boat_ui.biblio = false;
+                        params.wind_min_height = 260.0_f32.min(N);
+                        scenario.config = ConfigKind::ClassicFlow;
                         let base_params = boat_params_from_ui(&boat_ui);
                         let mut rng = rand::rng();
                         let layout = random_layout("alea_apercu", &base_params, &mut rng);
