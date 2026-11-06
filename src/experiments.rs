@@ -730,6 +730,7 @@ pub enum Action {
     Save,
     Import,
     Start,
+    RandomStart,
     Stop,
     Load(Config),
 }
@@ -813,7 +814,10 @@ impl Panel {
             ui.add(egui::DragValue::new(&mut self.warmup).clamp_range(0..=1_000_000).prefix("Stabilisation : ").suffix(" pas"));
             ui.add(egui::DragValue::new(&mut self.measure).clamp_range(2..=1_000_000).prefix("Mesure : ").suffix(" pas"));
             if let Some(r)=&self.recorder{ui.label(format!("Essai : {} / {} pas",r.step,r.config.warmup+r.config.measure));if ui.button("Arrêter (hors classement)").clicked(){action=Some(Action::Stop);}}
-            else if ui.button("Mesurer et classer (redémarre à zéro)").clicked(){action=Some(Action::Start);}
+            else {
+                if ui.button("Mesurer et classer (redémarre à zéro)").clicked(){action=Some(Action::Start);}
+                if ui.button("🎲 Tester et classer un bateau aléatoire").clicked(){action=Some(Action::RandomStart);}
+            }
             ui.small("Le calcul conserve le solveur actuel. Score exploratoire, pas une validation physique.");
             ui.separator();
             ui.label("Score maximal = capacité − traînée − protections");

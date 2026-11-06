@@ -235,7 +235,7 @@ impl BoatUiState {
         let end_space = ((N-self.hull_width)*0.5-2.0).clamp(1.0,N*0.3);
         self.bow_length = rng.random_range(1.0..=end_space);
         self.stern_length = rng.random_range(1.0..=end_space);
-        self.side_profile.freeboard_ratio = rng.random_range(0.05..=0.95);
+        // Garder le franc-bord : avec la coque fixe, la ligne d’eau ne bouge pas.
         self.side_profile.bow_rake = rng.random_range(0.0..=1.0);
         self.side_profile.stern_rake = rng.random_range(0.0..=1.0);
         self.side_profile.bow_exponent = rng.random_range(0.2..=6.0);
@@ -699,11 +699,7 @@ pub fn run_app(mut grid: Grid) -> ! {
     let mut step: usize = 0;
     let start = Instant::now();
 
-    // État pour le dessin de murs à la souris
-    let mut mouse_down = false;
-    let mut last_grid_pos: Option<(usize, usize)> = None; // pour le mode "libre"
-    let mut line_anchor: Option<(usize, usize)> = None;   // pour le mode "ligne droite"
-    let mut last_cursor_pixel: Option<(usize, usize)> = None; // dernière position connue (grille)
+    let mut wall_brush = WallBrush::default();
 
     let initial_waterline = boat_waterline_overlay(&boat_ui);
     let mut active_waterline = initial_waterline;
@@ -715,7 +711,6 @@ pub fn run_app(mut grid: Grid) -> ! {
 
     let mut keyboard_apply_boat = false;
     let mut experiments = crate::experiments::Panel::default();
-    let mut simulation_rect = egui::Rect::NOTHING;
     let mut simulation_texture: Option<egui::TextureHandle> = None;
 
     event_loop.run(move |event, elwt| {
@@ -723,7 +718,6 @@ pub fn run_app(mut grid: Grid) -> ! {
             Event::WindowEvent { event, .. } => {
                 let response = egui_winit.on_window_event(&window, &event);
                 if response.consumed {
-                    if matches!(event, WindowEvent::MouseInput { state: winit::event::ElementState::Released, .. }) { mouse_down=false;last_grid_pos=None;line_anchor=None; }
                     // egui a géré l'événement (clic sur un slider, etc.)
                 } else if let WindowEvent::KeyboardInput { event: key, .. } = event {
                     if key.state == winit::event::ElementState::Pressed && !key.repeat {
@@ -749,53 +743,6 @@ pub fn run_app(mut grid: Grid) -> ! {
                     if new_size.width > 0 && new_size.height > 0 {
                         if let Err(e) = pixels.resize_surface(new_size.width, new_size.height) {
                             eprintln!("Erreur redimensionnement surface: {e}");
-                        }
-                    }
-                } else if let WindowEvent::MouseInput { state, button, .. } = event {
-                    if button == winit::event::MouseButton::Left {
-                        let pressed = state == winit::event::ElementState::Pressed;
-
-                        if pressed {
-                            mouse_down = true;
-                            if params.straight_line_mode {
-                                line_anchor = last_cursor_pixel;
-                            } else {
-                                last_grid_pos = None;
-                                if let Some((gx, gy)) = last_cursor_pixel {
-                                    stamp_wall(&mut grid, gx, gy, params.pen_size);
-                                    last_grid_pos = Some((gx, gy));
-                                }
-                            }
-                        } else {
-                            if params.straight_line_mode {
-                                if let (Some(start_p), Some(end_p)) = (line_anchor, last_cursor_pixel) {
-                                    for (x, y) in bresenham_line(start_p.0, start_p.1, end_p.0, end_p.1) {
-                                        stamp_wall(&mut grid, x, y, params.pen_size);
-                                    }
-                                }
-                                line_anchor = None;
-                            }
-                            mouse_down = false;
-                            last_grid_pos = None;
-                        }
-                    }
-                } else if let WindowEvent::CursorMoved { position, .. } = event {
-                    let pos = egui::pos2(position.x as f32 / window.scale_factor() as f32, position.y as f32 / window.scale_factor() as f32);
-                    if simulation_rect.contains(pos) {
-                        let gx = ((pos.x - simulation_rect.left()) / simulation_rect.width() * grid_w as f32) as usize;
-                        let gy = ((pos.y - simulation_rect.top()) / simulation_rect.height() * grid_h as f32) as usize;
-                        if gx >= 1 && gx <= N as usize && gy >= 1 && gy <= N as usize {
-                            last_cursor_pixel = Some((gx, gy));
-
-                            if mouse_down && !params.straight_line_mode {
-                                stamp_wall(&mut grid, gx, gy, params.pen_size);
-                                if let Some((lx, ly)) = last_grid_pos {
-                                    for (x, y) in bresenham_line(lx, ly, gx, gy) {
-                                        stamp_wall(&mut grid, x, y, params.pen_size);
-                                    }
-                                }
-                                last_grid_pos = Some((gx, gy));
-                            }
                         }
                     }
                 } else if let WindowEvent::RedrawRequested = event {
@@ -1065,7 +1012,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         }
 
                                     });
-                                    ui.small("Aléatoire : géométrie et options du bateau, dimensions de coque et de conteneurs conservées. Les curseurs affichent le tirage ; le nombre de piles tient compte de la place disponible.");
+                                    ui.small("Aléatoire : géométrie et options du bateau, dimensions de coque et de conteneurs, niveau d’eau et réglages du vent conservés. Les curseurs affichent le tirage ; le nombre de piles tient compte de la place disponible.");
                                     ui.small("Les nouveaux réglages prennent effet à l'application du bateau.");
                                 });
 
@@ -1115,8 +1062,20 @@ pub fn run_app(mut grid: Grid) -> ! {
                             else { simulation_texture = Some(ctx.load_texture("simulation",image,egui::TextureOptions::NEAREST)); }
                             let side = ui.available_width().min(ui.available_height()).max(1.0);
                             let area = ui.available_rect_before_wrap();
-                            simulation_rect = egui::Rect::from_center_size(area.center(),egui::vec2(side,side));
-                            ui.put(simulation_rect,egui::Image::new((simulation_texture.as_ref().unwrap().id(),egui::vec2(side,side))));
+                            let simulation_rect = egui::Rect::from_center_size(area.center(),egui::vec2(side,side));
+                            let canvas = ui.put(simulation_rect,egui::Image::new((simulation_texture.as_ref().unwrap().id(),egui::vec2(side,side))).sense(egui::Sense::click_and_drag()));
+                            // L’image est un widget egui : traiter ses gestes ici, même
+                            // lorsque egui a consommé les événements natifs de souris.
+                            let (pressed,down,released,pos) = ctx.input(|i| (
+                                i.pointer.button_pressed(egui::PointerButton::Primary),
+                                i.pointer.button_down(egui::PointerButton::Primary),
+                                i.pointer.button_released(egui::PointerButton::Primary),
+                                i.pointer.interact_pos()));
+                            let last_cursor_pixel = if canvas.contains_pointer() {
+                                pos.and_then(|p| canvas_cell(simulation_rect,p,grid_w,grid_h))
+                            } else {None};
+                            wall_brush.update(&mut grid,params.pen_size,params.straight_line_mode,
+                                last_cursor_pixel,pressed,down,released);
                         });
                     });
 
@@ -1168,6 +1127,11 @@ pub fn run_app(mut grid: Grid) -> ! {
                         }
                     };
 
+                    if matches!(experiment_action, Some(crate::experiments::Action::RandomStart)) {
+                        apply_random_boat = true;
+                        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+                        experiments.name = format!("Bateau aléatoire {stamp}");
+                    }
                     if apply_random_boat {
                         boat_ui.randomize(&mut rand::rng());
                         apply_boat = true;
@@ -1185,7 +1149,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                             y_center: center.1 as f32 - height / 2.0 + height * profile.freeboard_ratio,
                             thickness: profile.waterline_thickness,
                         };
-                        params.wind_min_height = 260.0_f32.min(N);
+                        if !apply_random_boat { params.wind_min_height = 260.0_f32.min(N); }
                         scenario.config = ConfigKind::ClassicFlow;
                         let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
@@ -1206,21 +1170,22 @@ pub fn run_app(mut grid: Grid) -> ! {
                         c.waterline=waterline; c.warmup=panel.warmup; c.measure=panel.measure;
                         c.ui=serde_json::json!({"params":params,"boat":boat,"scenario":scenario}); c
                     };
+                    let mut started_this_frame = false;
                     if let Some(action)=experiment_action {
                         use crate::experiments::{Action,Config,Recorder};
                         let result=(|| -> Result<(),Box<dyn std::error::Error>> {
                             match action {
                                 Action::Stop => { if let Some(mut r)=experiments.recorder.take(){r.finish("interrupted")?;} experiments.status="Essai arrêté, données conservées hors classement".into(); },
-                                Action::Export | Action::Save | Action::Start => {
+                                Action::Export | Action::Save | Action::Start | Action::RandomStart => {
                                     if scenario.config!=ConfigKind::ClassicFlow {return Err("Les sauvegardes d’essais concernent le tunnel de vent. Sélectionne ce mode.".into());}
                                     let c=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center);c.validate()?;
                                     match action {
                                         Action::Export => {experiments.text=c.text()?;experiments.code_expanded=false;full_output.platform_output.copied_text=experiments.text.clone();},
                                         Action::Save => experiments.save(&c)?,
-                                        Action::Start => {
+                                        Action::Start | Action::RandomStart => {
                                             if c.counts().0==0 {return Err("Applique un bateau avec conteneurs avant de le classer.".into());}
                                             let (g,l)=c.grid()?; let r=Recorder::new(c,std::path::Path::new(&experiments.root))?;
-                                            grid=g;boat_labels=l;experiments.recorder=Some(r);params.paused=false;history.clear();step=0;
+                                            grid=g;boat_labels=l;experiments.recorder=Some(r);started_this_frame=true;params.paused=false;history.clear();step=0;
                                             experiments.status="Mesure en cours ; toute modification physique interrompt l’essai.".into();
                                         },_=>unreachable!()
                                     }
@@ -1239,7 +1204,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                     params.wind_min_height=c.wind_height;params.realistic_wind=c.realistic_wind;params.paused=true;
                                     scenario.config=ConfigKind::ClassicFlow;active_waterline.y_center=c.waterline;
                                     experiments.name=c.name.clone();experiments.warmup=c.warmup;experiments.measure=c.measure;
-                                    experiments.text=c.text()?;experiments.code_expanded=false;history.clear();step=0;mouse_down=false;line_anchor=None;last_cursor_pixel=None;
+                                    experiments.text=c.text()?;experiments.code_expanded=false;history.clear();step=0;wall_brush=WallBrush::default();
                                     experiments.status="Bateau rechargé à zéro, en pause. Géométrie exacte restaurée.".into();
                                 }
                             } Ok(())
@@ -1248,7 +1213,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     // Un essai ne mélange jamais plusieurs géométries ou réglages.
                     if let Some(r)=&experiments.recorder {
                         let now=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center);
-                        if do_restart || apply_boat || apply_random_boat || scenario.config!=ConfigKind::ClassicFlow || now.bands!=r.config.bands || now.speed!=r.config.speed || now.density!=r.config.density || now.wind_height!=r.config.wind_height || now.realistic_wind!=r.config.realistic_wind || now.waterline!=r.config.waterline {
+                        if ((!started_this_frame) && (do_restart || apply_boat || apply_random_boat)) || scenario.config!=ConfigKind::ClassicFlow || now.bands!=r.config.bands || now.speed!=r.config.speed || now.density!=r.config.density || now.wind_height!=r.config.wind_height || now.realistic_wind!=r.config.realistic_wind || now.waterline!=r.config.waterline {
                             if let Some(mut r)=experiments.recorder.take(){experiments.status=match r.finish("interrupted"){Ok(_)=>"Réglages modifiés : essai interrompu, hors classement.".into(),Err(e)=>e.to_string()};}
                         }
                     }
@@ -1346,6 +1311,45 @@ pub fn run_app(mut grid: Grid) -> ! {
     unreachable!()
 }
 
+#[derive(Default)]
+struct WallBrush {
+    down: bool,
+    last: Option<(usize,usize)>,
+    anchor: Option<(usize,usize)>,
+}
+impl WallBrush {
+    fn update(&mut self,grid:&mut Grid,size:usize,line:bool,cell:Option<(usize,usize)>,pressed:bool,down:bool,released:bool) {
+        if pressed && cell.is_some() {
+            self.down=true;self.last=None;self.anchor=if line {cell} else {None};
+        }
+        if self.down && (down || pressed) && !line {
+            if let Some((x,y))=cell {
+                stamp_wall(grid,x,y,size);
+                if let Some((lx,ly))=self.last {
+                    for (x,y) in bresenham_line(lx,ly,x,y) {stamp_wall(grid,x,y,size);}
+                }
+                self.last=cell;
+            } else {self.last=None;}
+        }
+        if released || (!down && !pressed) {
+            if released && self.down && line {
+                if let (Some(a),Some(b))=(self.anchor,cell) {
+                    for (x,y) in bresenham_line(a.0,a.1,b.0,b.1) {stamp_wall(grid,x,y,size);}
+                }
+            }
+            *self=Self::default();
+        }
+    }
+}
+
+/// Coordonnées logiques egui : indépendantes du facteur DPI et du menu.
+fn canvas_cell(rect: egui::Rect, pos: egui::Pos2, width: usize, height: usize) -> Option<(usize,usize)> {
+    if !rect.contains(pos) || rect.width()<=0.0 || rect.height()<=0.0 {return None;}
+    let x=((pos.x-rect.left())/rect.width()*width as f32).floor() as usize;
+    let y=((pos.y-rect.top())/rect.height()*height as f32).floor() as usize;
+    if x>=1 && x+1<width && y>=1 && y+1<height {Some((x,y))} else {None}
+}
+
 fn save_screenshot(frame: &[u8], w: usize, h: usize, step: usize) {
     let path = format!("screenshot_step_{step}.png");
     if let Err(e) = image::save_buffer(&path, frame, w as u32, h as u32, image::ColorType::Rgba8) {
@@ -1381,16 +1385,47 @@ mod random_boat_tests {
     use super::*;
     use rand::SeedableRng;
     #[test]
+    fn drawing_supports_freehand_lines_and_ignores_menu_gestures() {
+        let mut g=Grid::new();let mut brush=WallBrush::default();
+        brush.update(&mut g,1,false,Some((100,100)),true,true,false);
+        brush.update(&mut g,1,false,Some((110,100)),false,true,false);
+        brush.update(&mut g,1,false,None,false,false,true);
+        for x in 100..=110 {assert!(g.cells[g.to_index(x,100)].wall);}
+        brush.update(&mut g,1,true,Some((120,120)),true,true,false);
+        assert!(!g.cells[g.to_index(125,125)].wall);
+        brush.update(&mut g,1,true,Some((130,130)),false,false,true);
+        for x in 120..=130 {assert!(g.cells[g.to_index(x,x)].wall);}
+        brush.update(&mut g,1,false,None,true,true,false);
+        brush.update(&mut g,1,false,Some((150,150)),false,true,false);
+        brush.update(&mut g,1,false,Some((150,150)),false,false,true);
+        assert!(!g.cells[g.to_index(150,150)].wall);
+    }
+    #[test]
+    fn canvas_coordinates_follow_offset_and_resize_and_exclude_menu() {
+        for size in [512.0,850.0] {
+            let rect=egui::Rect::from_min_size(egui::pos2(350.0,40.0),egui::vec2(size,size));
+            assert_eq!(canvas_cell(rect,rect.center(),512,512),Some((256,256)));
+            assert_eq!(canvas_cell(rect,egui::pos2(100.0,100.0),512,512),None);
+            assert_eq!(canvas_cell(rect,rect.left_top(),512,512),None);
+        }
+        let mut grid=Grid::new();stamp_wall(&mut grid,100,120,1);
+        assert!(grid.cells[grid.to_index(100,120)].wall);
+    }
+    #[test]
     fn random_boat_preserves_manual_hull_and_explores_options() {
         let mut rng=rand::rngs::StdRng::seed_from_u64(123);
         let mut boat=BoatUiState::default();boat.hull_width=180.0;boat.hull_height=40.0;
         boat.container_width=13.5;boat.container_height=9.5;
+        let initial_waterline=boat_waterline_overlay(&boat).y_center;
+        let initial_freeboard=boat.side_profile.freeboard_ratio;
         let mut kinds=std::collections::HashSet::new();let mut profiles=std::collections::HashSet::new();
         let mut bows=std::collections::HashSet::new();
         for _ in 0..128 {
             boat.randomize(&mut rng);
             assert_eq!((boat.hull_width,boat.hull_height),(180.0,40.0));assert!(!boat.biblio);
             assert_eq!((boat.container_width,boat.container_height),(13.5,9.5));
+            assert_eq!(boat.side_profile.freeboard_ratio,initial_freeboard);
+            assert_eq!(boat_waterline_overlay(&boat).y_center,initial_waterline);
             assert!((1..=25).contains(&boat.rows));assert!((1..=25).contains(&boat.cols));
             kinds.insert(boat.kind_index);profiles.insert(boat.bow_fairing_kind_index);bows.insert(boat.curve_bow);
         }

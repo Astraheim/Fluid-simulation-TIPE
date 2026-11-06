@@ -8,7 +8,7 @@
 4. Régler les pas de stabilisation et de mesure, puis **Mesurer et classer**. L'essai repart de zéro, accumule les statistiques en mémoire et s'arrête automatiquement. Une modification physique interrompt l'essai et l'exclut du classement ; une pause ou un changement de couleur ne l'invalide pas.
 5. Les essais terminés apparaissent du meilleur au moins bon, avec **Charger** et **Copier**. Changer les poids recalcule immédiatement le classement. **Enregistrer ce classement / ces poids** conserve ce choix dans `results/ranking.json` ; la fin d'un essai enregistre également le classement courant.
 
-Le menu occupe sa propre zone à gauche et la simulation carrée s'ajuste à la place disponible à droite, y compris après agrandissement. Le dessin à la souris utilise les coordonnées de cette zone.
+Le menu occupe sa propre zone à gauche et la simulation carrée s'ajuste à la place disponible à droite, y compris après agrandissement. Le dessin à la souris utilise les coordonnées de cette zone : clic gauche maintenu pour le tracé libre, ou glisser-relâcher avec le mode ligne droite. Les gestes sont traités par le widget de simulation ; les clics dans le menu ne dessinent pas de murs.
 
 ## Score et comparabilité
 
@@ -69,6 +69,10 @@ La campagne initiale compare trois chargements sur la même coque biblio, chacun
 
 ## Bateau aléatoire et extrémités de coque
 
-Le bouton **Bateau aléatoire (coque conservée)** du générateur tire les réglages de géométrie et les options (disposition et nombre de conteneurs, supports, proue, poupe, franc-bord et carénages). La longueur et la hauteur du corps central, ainsi que la largeur et la hauteur des conteneurs, restent celles choisies manuellement. Les curseurs reflètent le tirage et le bateau est appliqué immédiatement. Les piles sont limitées à la place disponible ; les réglages de vent et de mesure ne sont pas tirés au hasard. Le mode biblio est désactivé pour laisser ces réglages agir.
+Le bouton **Bateau aléatoire (coque conservée)** du générateur tire les réglages de géométrie et les options (disposition et nombre de conteneurs, supports, proue, poupe et carénages). La longueur et la hauteur du corps central, ainsi que la largeur et la hauteur des conteneurs, restent celles choisies manuellement. Le franc-bord, et donc la hauteur d’eau à dimensions de coque constantes, ainsi que les réglages du vent sont conservés. Les curseurs reflètent le tirage et le bateau est appliqué immédiatement. Les piles sont limitées à la place disponible ; les réglages de vent et de mesure ne sont pas tirés au hasard. Le mode biblio est désactivé pour laisser ces réglages agir.
 
-La proue et la poupe sont maintenant comptées comme protections dans le coût. Leurs formes peuvent varier dans un même classement, à corps central et autres conditions identiques. Leur géométrie et leurs forces restent intégralement présentes dans la simulation. Le tirage peut encore changer le franc-bord, ce qui sépare les classements. Pour comparer ces variantes ensemble, remettre le même franc-bord, puis appliquer le bateau avant l’essai.
+La proue et la poupe sont maintenant comptées comme protections dans le coût. Leurs formes peuvent varier dans un même classement, à corps central et autres conditions identiques. Leur géométrie et leurs forces restent intégralement présentes dans la simulation. Le tirage conserve désormais le franc-bord et les dimensions des conteneurs : les variantes ainsi générées peuvent être comparées avec le même protocole.
+
+### Générer, tester et classer en un clic
+
+Dans **Bateaux sauvegardés / classement**, le bouton **Tester et classer un bateau aléatoire** génère et applique un bateau avec les dimensions de coque et de conteneurs sélectionnées, conserve le franc-bord et le vent, lui attribue un nom unique et démarre immédiatement l’essai depuis zéro. Il utilise les nombres de pas de stabilisation et de mesure du menu. À la fin, la synthèse est sauvegardée et le classement est actualisé automatiquement. Le bouton n’est proposé que lorsqu’aucun essai n’est en cours.
