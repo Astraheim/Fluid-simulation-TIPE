@@ -1,6 +1,6 @@
 use crate::conditions::*;
 use crate::grid::{Grid, ObjectForce};
-use crate::ship::{build_biblio_layout, build_boat_layout, random_layout, BoatParams, ContainerLayoutKind, FairingProfile, SideProfileSettings, WallKind};
+use crate::ship::{build_biblio_layout, build_boat_layout, BoatParams, ContainerLayoutKind, FairingProfile, SideProfileSettings, WallKind};
 use egui::Context;
 use egui_wgpu::{Renderer as EguiRenderer, ScreenDescriptor};
 use pixels::{Pixels, SurfaceTexture};
@@ -223,8 +223,49 @@ struct BoatUiState {
     bow_fairing_kind_index: usize,
     stern_fairing_kind_index: usize,
 
-    // Nombre de configurations aléatoires à comparer (console uniquement)
-    random_batch_size: usize,
+}
+
+impl BoatUiState {
+    fn randomize(&mut self, rng: &mut impl rand::Rng) {
+        self.biblio = false;
+        self.kind_index = rng.random_range(0..4);
+        self.curve_bow = rng.random_bool(0.5);
+        self.curve_stern = rng.random_bool(0.5);
+        self.hull_curvature = rng.random_range(0.0..=1.0);
+        let end_space = ((N-self.hull_width)*0.5-2.0).clamp(1.0,N*0.3);
+        self.bow_length = rng.random_range(1.0..=end_space);
+        self.stern_length = rng.random_range(1.0..=end_space);
+        self.side_profile.freeboard_ratio = rng.random_range(0.05..=0.95);
+        self.side_profile.bow_rake = rng.random_range(0.0..=1.0);
+        self.side_profile.stern_rake = rng.random_range(0.0..=1.0);
+        self.side_profile.bow_exponent = rng.random_range(0.2..=6.0);
+        self.side_profile.stern_exponent = rng.random_range(0.2..=6.0);
+        self.side_profile.forecastle_rise = rng.random_range(0.0..=0.8);
+        self.side_profile.forecastle_length_ratio = rng.random_range(0.01..=1.0);
+        let space = (N*0.5-self.hull_height*0.5-3.0).max(4.0);
+        self.support_height = rng.random_range(1.0..=(space/6.0).clamp(1.0,20.0));
+        let stack_space = if self.kind_index==3 {space-3.0*self.support_height} else {space};
+        self.container_height = rng.random_range(2.0..=stack_space.clamp(2.0,100.0));
+        let max_width = if self.kind_index==2 {(self.hull_width-2.0)/1.5} else {self.hull_width-2.0};
+        self.container_width = rng.random_range(2.0..=max_width.clamp(2.0,100.0));
+        let max_gap = if self.kind_index==2 {(2.0*(self.hull_width-2.0-1.5*self.container_width)).clamp(0.0,40.0)} else {40.0};
+        self.container_gap = rng.random_range(0.0..=max_gap);
+        let usable = self.hull_width-2.0-if self.kind_index==2 {(self.container_width+self.container_gap)*0.5} else {0.0};
+        let max_cols = ((usable+self.container_gap)/(self.container_width+self.container_gap)).floor().clamp(1.0,25.0) as usize;
+        self.cols = rng.random_range(1..=max_cols);
+        let max_rows = (stack_space/self.container_height).floor().clamp(1.0,25.0) as usize;
+        self.rows = rng.random_range(1..=if self.kind_index==1 {max_rows.min(max_cols)} else {max_rows});
+        self.add_bow_fairing = rng.random_bool(0.5);
+        self.add_stern_fairing = rng.random_bool(0.5);
+        self.bow_fairing_kind_index = rng.random_range(0..7);
+        self.stern_fairing_kind_index = rng.random_range(0..7);
+        self.bow_fairing_length = rng.random_range(2.0..=N*0.25);
+        self.stern_fairing_length = rng.random_range(2.0..=N*0.25);
+        self.bow_fairing_height_scale = rng.random_range(0.2..=2.5);
+        self.stern_fairing_height_scale = rng.random_range(0.2..=2.5);
+        self.bow_fairing_position = rng.random_range(0.0..=1.0);
+        self.stern_fairing_position = rng.random_range(0.0..=1.0);
+    }
 }
 
 fn default_support_height() -> f32 { 4.0 }
@@ -267,7 +308,6 @@ impl Default for BoatUiState {
             stern_fairing_position: 0.0,
             bow_fairing_kind_index: 5,
             stern_fairing_kind_index: 0,
-            random_batch_size: 8,
         }
     }
 }
@@ -1022,11 +1062,12 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         apply_boat = true;
                                     }
                                     ui.horizontal(|ui| {
-                                        if ui.button("🎲 Configuration aléatoire").clicked() {
+                                        if ui.button("🎲 Bateau aléatoire (coque conservée)").clicked() {
                                             apply_random_boat = true;
                                         }
-                                        ui.add(egui::Slider::new(&mut boat_ui.random_batch_size, 2..=40).text("N (comparaison console)"));
+
                                     });
+                                    ui.small("Aléatoire : géométrie et options du bateau, dimensions centrales conservées. Les curseurs affichent le tirage. Les dimensions sont limitées à la place disponible.");
                                     ui.small("Les nouveaux réglages prennent effet à l'application du bateau.");
                                 });
 
@@ -1129,6 +1170,11 @@ pub fn run_app(mut grid: Grid) -> ! {
                         }
                     };
 
+                    if apply_random_boat {
+                        boat_ui.randomize(&mut rand::rng());
+                        apply_boat = true;
+                    }
+
                     if apply_boat {
                         let boat_params = boat_params_from_ui(&boat_ui);
                         let (layout, profile) = if boat_ui.biblio {
@@ -1151,30 +1197,6 @@ pub fn run_app(mut grid: Grid) -> ! {
                         setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
                         history.clear();
                         step = 0;
-                    }
-
-                    if apply_random_boat {
-                        boat_ui.biblio = false;
-                        params.wind_min_height = 260.0_f32.min(N);
-                        scenario.config = ConfigKind::ClassicFlow;
-                        let base_params = boat_params_from_ui(&boat_ui);
-                        let mut rng = rand::rng();
-                        let layout = random_layout("alea_apercu", &base_params, &mut rng);
-                        active_waterline = boat_waterline_overlay(&boat_ui);
-                        let hole_pos = tunnel_hole_positions();
-                        grid = Grid::new();
-                        boat_labels = grid.apply_layout_with_profile(&layout, &boat_ui.side_profile);
-                        setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
-                        history.clear();
-                        step = 0;
-
-                        // Comparaison headless lancée en tâche de fond pour ne pas geler l'UI.
-                        let n = boat_ui.random_batch_size;
-                        let hole_pos_bg = hole_pos.clone();
-                        std::thread::spawn(move || {
-                            let variants = crate::ship::random_variants(base_params, n);
-                            crate::ship::compare_layouts(&variants, 100, &hole_pos_bg);
-                        });
                     }
 
                     // Capturer les murs réellement appliqués, pas seulement les curseurs du générateur.
@@ -1354,4 +1376,26 @@ fn bresenham_line(x0: usize, y0: usize, x1: usize, y1: usize) -> Vec<(usize, usi
         if e2 < dx { err += dx; y += sy; }
     }
     points
+}
+
+#[cfg(test)]
+mod random_boat_tests {
+    use super::*;
+    use rand::SeedableRng;
+    #[test]
+    fn random_boat_preserves_manual_hull_and_explores_options() {
+        let mut rng=rand::rngs::StdRng::seed_from_u64(123);
+        let mut boat=BoatUiState::default();boat.hull_width=180.0;boat.hull_height=40.0;
+        let mut kinds=std::collections::HashSet::new();let mut profiles=std::collections::HashSet::new();
+        let mut bows=std::collections::HashSet::new();
+        for _ in 0..128 {
+            boat.randomize(&mut rng);
+            assert_eq!((boat.hull_width,boat.hull_height),(180.0,40.0));assert!(!boat.biblio);
+            assert!((2.0..=100.0).contains(&boat.container_width));assert!((2.0..=100.0).contains(&boat.container_height));
+            assert!((1..=25).contains(&boat.rows));assert!((1..=25).contains(&boat.cols));
+            kinds.insert(boat.kind_index);profiles.insert(boat.bow_fairing_kind_index);bows.insert(boat.curve_bow);
+        }
+        assert_eq!(kinds.len(),4);assert_eq!(profiles.len(),7);assert_eq!(bows.len(),2);
+        for size in [5.0,N*0.9] {boat.hull_width=size;boat.hull_height=size;boat.randomize(&mut rng);assert_eq!(boat.hull_width,size);}
+    }
 }

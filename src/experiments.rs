@@ -151,7 +151,11 @@ impl Config {
                 }
                 if matches!(
                     k,
-                    WallKind::BowFairing | WallKind::SternFairing | WallKind::Support
+                    WallKind::BowHull
+                        | WallKind::SternHull
+                        | WallKind::BowFairing
+                        | WallKind::SternFairing
+                        | WallKind::Support
                 ) {
                     protection += n;
                 }
@@ -168,17 +172,15 @@ impl Config {
         let hull: Vec<_> = self
             .bands
             .iter()
-            .filter(|b| {
-                !matches!(
-                    b.kind,
-                    Some(
-                        WallKind::Container(_)
-                            | WallKind::BowFairing
-                            | WallKind::SternFairing
-                            | WallKind::Support
-                    )
-                )
-            })
+            .filter(|b| matches!(b.kind, None | Some(WallKind::Hull)))
+            .collect();
+        // La bande d'eau est interrompue par la proue/poupe : comparer ses
+        // niveaux, pas ses trous, qui changent avec les protections.
+        let water_rows: std::collections::BTreeSet<_> = self
+            .bands
+            .iter()
+            .filter(|b| b.kind == Some(WallKind::Water))
+            .flat_map(|b| b.first..=b.last)
             .collect();
         serde_json::to_string(&(
             self.n,
@@ -191,6 +193,7 @@ impl Config {
             self.warmup,
             self.measure,
             hull,
+            water_rows,
             (
                 &self.ui["boat"]["container_width"],
                 &self.ui["boat"]["container_height"],
@@ -693,6 +696,27 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn hull_ends_count_as_protections_without_splitting_rankings() {
+        let (mut layout, profile) = crate::ship::build_biblio_layout();
+        let mut g = Grid::new();
+        let labels = g.apply_layout_with_profile(&layout, &profile);
+        let a = Config::capture(&g, &labels);
+        layout.hull_curve.as_mut().unwrap().bow_length *= 0.5;
+        layout.hull_curve.as_mut().unwrap().stern_length *= 0.5;
+        let mut g = Grid::new();
+        let labels = g.apply_layout_with_profile(&layout, &profile);
+        let b = Config::capture(&g, &labels);
+        assert_eq!(a.protocol(), b.protocol());
+        assert!(a.counts().1 > b.counts().1);
+        let ends: usize = a
+            .bands
+            .iter()
+            .filter(|b| matches!(b.kind, Some(WallKind::BowHull | WallKind::SternHull)))
+            .map(|b| b.last - b.first + 1)
+            .sum();
+        assert_eq!(a.counts().1, ends);
+    }
+    #[test]
     fn zero_residual() {
         let mut g = Grid::new();
         g.project();
@@ -800,7 +824,7 @@ impl Panel {
                 ui.add(egui::DragValue::new(&mut self.weights.protection_ref).clamp_range(1.0..=1e6).prefix("Cellules de protection de référence : "));
                 ui.text_edit_singleline(&mut self.root);
             });
-            ui.small("Coût estimé = cellules de carénage + supports (surface 2D), pas un prix en euros. Couple conservé dans les résultats.");
+            ui.small("Coût estimé = proue + poupe + carénages + supports (surface 2D), pas un prix en euros. Couple conservé dans les résultats.");
             if ui.button("Actualiser les résultats").clicked(){self.refresh();}
             let mut protocols:Vec<(String,String)>=Vec::new();
             for e in &self.entries {let key=format!("{}{}",e.source,e.config.protocol());if !protocols.iter().any(|(k,_)|*k==key){protocols.push((key,format!("{} — U={} — {}+{} pas",e.config.name,e.config.speed,e.config.warmup,e.config.measure)));}}
