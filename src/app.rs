@@ -272,7 +272,7 @@ impl Default for BoatUiState {
     fn default() -> Self {
         Self {
             biblio: false,
-            hull_width: 120.0,
+            hull_width: 250.0,
             hull_height: 30.0,
             container_width: 10.0,
             container_height: 8.0,
