@@ -76,3 +76,7 @@ La proue et la poupe sont maintenant comptées comme protections dans le coût. 
 ### Générer, tester et classer en un clic
 
 Dans **Bateaux sauvegardés / classement**, le bouton **Tester et classer un bateau aléatoire** génère et applique un bateau avec les dimensions de coque et de conteneurs sélectionnées, conserve le franc-bord et le vent, lui attribue un nom unique et démarre immédiatement l’essai depuis zéro. Il utilise les nombres de pas de stabilisation et de mesure du menu. À la fin, la synthèse est sauvegardée et le classement est actualisé automatiquement. Le bouton n’est proposé que lorsqu’aucun essai n’est en cours.
+
+### Chargement minimum des bateaux aléatoires
+
+Les deux boutons aléatoires imposent au moins **50 conteneurs**. Le nombre est calculé selon la disposition (grille, pyramide, quinconce ou étagée), avec un espacement adapté à la place disponible et des dimensions de conteneurs conservées. Seules les dispositions permettant ce chargement sont tirées. Si aucune ne convient, un message explique l’impossibilité et le bateau courant reste inchangé ; aucun essai aléatoire ne démarre.

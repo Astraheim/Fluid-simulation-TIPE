@@ -189,7 +189,7 @@ impl TickHistory {
 }
 
 /// État des champs du panneau "Générateur de bateau".
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct BoatUiState {
     biblio: bool,
     hull_width: f32,
@@ -226,9 +226,44 @@ struct BoatUiState {
 }
 
 impl BoatUiState {
-    fn randomize(&mut self, rng: &mut impl rand::Rng) {
-        self.biblio = false;
-        self.kind_index = rng.random_range(0..4);
+    fn randomize(&mut self, rng: &mut impl rand::Rng) -> Result<(), &'static str> {
+        // Choisir parmi les chargements admissibles, sans boucle de rejet.
+        // Les dimensions manuelles ne sont jamais réduites pour atteindre 50.
+        let space = N*0.5-self.hull_height*0.5-3.0;
+        let support_height = rng.random_range(1.0..=((space-self.container_height)/3.0).clamp(1.0,20.0));
+        let mut choices = Vec::new();
+        for kind in 0..4 {
+            let stack_space = if kind==3 {space-3.0*support_height} else {space};
+            let mut layouts = Vec::new();
+            for rows in 1..=25usize {
+                if rows as f32*self.container_height>stack_space {continue;}
+                for cols in 1..=25usize {
+                    if kind==1 && cols!=rows {continue;}
+                    let count = match kind {
+                        1 => rows*(rows+1)/2,
+                        3 => (0..cols).map(|c|1+c*(rows-1)/(cols-1).max(1)).sum(),
+                        _ => rows*cols,
+                    };
+                    if count<50 {continue;}
+                    let extra = if kind==2 && rows>1 {0.5} else {0.0};
+                    let used=(cols as f32+extra)*self.container_width;
+                    let free=self.hull_width-2.0-used;
+                    if free<0.0 {continue;}
+                    let gaps=cols as f32-1.0+extra;
+                    let max_gap=if gaps>0.0 {(free/gaps).min(40.0)} else {40.0};
+                    layouts.push((rows,cols,max_gap));
+                }
+            }
+            if !layouts.is_empty() {choices.push((kind,layouts));}
+        }
+        if choices.is_empty() {
+            return Err("Impossible de placer 50 conteneurs avec ces dimensions. Augmente la longueur de coque ou réduis les dimensions des conteneurs.");
+        }
+        let (kind,layouts)=&choices[rng.random_range(0..choices.len())];
+        let (rows,cols,max_gap)=layouts[rng.random_range(0..layouts.len())];
+        self.biblio=false;self.kind_index=*kind;self.rows=rows;self.cols=cols;
+        self.support_height=support_height;
+        self.container_gap=rng.random_range(0.0..=max_gap);
         self.curve_bow = true;
         self.curve_stern = true;
         self.hull_curvature = rng.random_range(0.0..=1.0);
@@ -242,17 +277,6 @@ impl BoatUiState {
         self.side_profile.stern_exponent = rng.random_range(0.2..=6.0);
         self.side_profile.forecastle_rise = rng.random_range(0.0..=0.8);
         self.side_profile.forecastle_length_ratio = rng.random_range(0.01..=1.0);
-        let space = (N*0.5-self.hull_height*0.5-3.0).max(4.0);
-        self.support_height = rng.random_range(1.0..=(space/6.0).clamp(1.0,20.0));
-        let stack_space = if self.kind_index==3 {space-3.0*self.support_height} else {space};
-        // Les dimensions des conteneurs restent celles choisies manuellement.
-        let max_gap = if self.kind_index==2 {(2.0*(self.hull_width-2.0-1.5*self.container_width)).clamp(0.0,40.0)} else {40.0};
-        self.container_gap = rng.random_range(0.0..=max_gap);
-        let usable = self.hull_width-2.0-if self.kind_index==2 {(self.container_width+self.container_gap)*0.5} else {0.0};
-        let max_cols = ((usable+self.container_gap)/(self.container_width+self.container_gap)).floor().clamp(1.0,25.0) as usize;
-        self.cols = rng.random_range(1..=max_cols);
-        let max_rows = (stack_space/self.container_height).floor().clamp(1.0,25.0) as usize;
-        self.rows = rng.random_range(1..=if self.kind_index==1 {max_rows.min(max_cols)} else {max_rows});
         self.add_bow_fairing = rng.random_bool(0.5);
         self.add_stern_fairing = rng.random_bool(0.5);
         self.bow_fairing_kind_index = rng.random_range(0..7);
@@ -263,7 +287,14 @@ impl BoatUiState {
         self.stern_fairing_height_scale = rng.random_range(0.2..=1.1);
         self.bow_fairing_position = rng.random_range(0.0..=1.0);
         self.stern_fairing_position = rng.random_range(0.0..=1.0);
+        Ok(())
     }
+}
+
+fn visible_container_count(grid:&Grid,labels:&HashMap<usize,WallKind>)->usize {
+    labels.iter().filter_map(|(&idx,kind)|match kind {
+        WallKind::Container(id) if grid.cells[idx].wall=>Some(*id), _=>None,
+    }).collect::<std::collections::HashSet<_>>().len()
 }
 
 fn default_support_height() -> f32 { 4.0 }
@@ -1132,9 +1163,15 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
                         experiments.name = format!("Bateau aléatoire {stamp}");
                     }
+                    let previous_boat_ui = boat_ui.clone();
                     if apply_random_boat {
-                        boat_ui.randomize(&mut rand::rng());
-                        apply_boat = true;
+                        match boat_ui.randomize(&mut rand::rng()) {
+                            Ok(()) => apply_boat=true,
+                            Err(message) => {
+                                experiments.status=message.into();apply_random_boat=false;apply_boat=false;
+                                if matches!(experiment_action,Some(crate::experiments::Action::RandomStart)) {experiment_action=None;}
+                            }
+                        }
                     }
 
                     if apply_boat {
@@ -1145,20 +1182,25 @@ pub fn run_app(mut grid: Grid) -> ! {
                             (build_boat_layout("custom", &boat_params), boat_ui.side_profile)
                         };
                         let (center, _, height) = layout.hull_rects[0];
-                        active_waterline = WaterlineOverlay {
+                        let next_waterline = WaterlineOverlay {
                             y_center: center.1 as f32 - height / 2.0 + height * profile.freeboard_ratio,
                             thickness: profile.waterline_thickness,
                         };
-                        if !apply_random_boat { params.wind_min_height = 260.0_f32.min(N); }
-                        scenario.config = ConfigKind::ClassicFlow;
-                        let hole_pos = tunnel_hole_positions();
-                        grid = Grid::new();
-                        boat_labels = grid.apply_layout_with_profile(&layout, &profile);
-                        // La grille vient d'être recréée : il faut reposer les
-                        // murs de la configuration active une fois.
-                        setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
-                        history.clear();
-                        step = 0;
+                        let mut next_grid=Grid::new();
+                        let next_labels=next_grid.apply_layout_with_profile(&layout,&profile);
+                        setup_config(&mut next_grid,ConfigKind::ClassicFlow,&tunnel_hole_positions(),next_waterline.y_center);
+                        let count=visible_container_count(&next_grid,&next_labels);
+                        if apply_random_boat && count<50 {
+                            boat_ui=previous_boat_ui;
+                            experiments.status=format!("Le tirage ne laisse que {count} conteneurs visibles : bateau précédent conservé. Réessaie ou ajuste les dimensions.");
+                            apply_boat=false;apply_random_boat=false;
+                            if matches!(experiment_action,Some(crate::experiments::Action::RandomStart)) {experiment_action=None;}
+                        } else {
+                            active_waterline=next_waterline;grid=next_grid;boat_labels=next_labels;
+                            if !apply_random_boat {params.wind_min_height=260.0_f32.min(N);}
+                            scenario.config=ConfigKind::ClassicFlow;
+                            history.clear();step=0;
+                        }
                     }
 
                     // Capturer les murs réellement appliqués, pas seulement les curseurs du générateur.
@@ -1420,7 +1462,7 @@ mod random_boat_tests {
         let initial_freeboard=boat.side_profile.freeboard_ratio;
         let mut kinds=std::collections::HashSet::new();let mut profiles=std::collections::HashSet::new();
         for _ in 0..128 {
-            boat.randomize(&mut rng);
+            boat.randomize(&mut rng).unwrap();
             assert_eq!((boat.hull_width,boat.hull_height),(180.0,40.0));assert!(!boat.biblio);
             assert_eq!((boat.container_width,boat.container_height),(13.5,9.5));
             assert!(boat.curve_bow && boat.curve_stern);
@@ -1431,9 +1473,21 @@ mod random_boat_tests {
             assert_eq!(boat.side_profile.freeboard_ratio,initial_freeboard);
             assert_eq!(boat_waterline_overlay(&boat).y_center,initial_waterline);
             assert!((1..=25).contains(&boat.rows));assert!((1..=25).contains(&boat.cols));
+            let count=match boat.kind_index {
+                1=>boat.rows*(boat.rows+1)/2,
+                3=>(0..boat.cols).map(|c|1+c*(boat.rows-1)/(boat.cols-1).max(1)).sum(),
+                _=>boat.rows*boat.cols,
+            };
+            assert!(count>=50);
             kinds.insert(boat.kind_index);profiles.insert(boat.bow_fairing_kind_index);
         }
         assert_eq!(kinds.len(),4);assert_eq!(profiles.len(),7);
-        for size in [5.0,N*0.9] {boat.hull_width=size;boat.hull_height=size;boat.randomize(&mut rng);assert_eq!(boat.hull_width,size);}
+        boat.container_width=100.0;boat.container_height=100.0;
+        for size in [5.0,N*0.9] {
+            boat.hull_width=size;boat.hull_height=size;
+            let before=serde_json::to_string(&boat).unwrap();
+            assert!(boat.randomize(&mut rng).is_err());
+            assert_eq!(serde_json::to_string(&boat).unwrap(),before);
+        }
     }
 }
