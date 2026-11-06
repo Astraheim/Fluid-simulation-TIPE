@@ -245,9 +245,7 @@ impl BoatUiState {
         let space = (N*0.5-self.hull_height*0.5-3.0).max(4.0);
         self.support_height = rng.random_range(1.0..=(space/6.0).clamp(1.0,20.0));
         let stack_space = if self.kind_index==3 {space-3.0*self.support_height} else {space};
-        self.container_height = rng.random_range(2.0..=stack_space.clamp(2.0,100.0));
-        let max_width = if self.kind_index==2 {(self.hull_width-2.0)/1.5} else {self.hull_width-2.0};
-        self.container_width = rng.random_range(2.0..=max_width.clamp(2.0,100.0));
+        // Les dimensions des conteneurs restent celles choisies manuellement.
         let max_gap = if self.kind_index==2 {(2.0*(self.hull_width-2.0-1.5*self.container_width)).clamp(0.0,40.0)} else {40.0};
         self.container_gap = rng.random_range(0.0..=max_gap);
         let usable = self.hull_width-2.0-if self.kind_index==2 {(self.container_width+self.container_gap)*0.5} else {0.0};
@@ -1067,7 +1065,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         }
 
                                     });
-                                    ui.small("Aléatoire : géométrie et options du bateau, dimensions centrales conservées. Les curseurs affichent le tirage. Les dimensions sont limitées à la place disponible.");
+                                    ui.small("Aléatoire : géométrie et options du bateau, dimensions de coque et de conteneurs conservées. Les curseurs affichent le tirage ; le nombre de piles tient compte de la place disponible.");
                                     ui.small("Les nouveaux réglages prennent effet à l'application du bateau.");
                                 });
 
@@ -1386,12 +1384,13 @@ mod random_boat_tests {
     fn random_boat_preserves_manual_hull_and_explores_options() {
         let mut rng=rand::rngs::StdRng::seed_from_u64(123);
         let mut boat=BoatUiState::default();boat.hull_width=180.0;boat.hull_height=40.0;
+        boat.container_width=13.5;boat.container_height=9.5;
         let mut kinds=std::collections::HashSet::new();let mut profiles=std::collections::HashSet::new();
         let mut bows=std::collections::HashSet::new();
         for _ in 0..128 {
             boat.randomize(&mut rng);
             assert_eq!((boat.hull_width,boat.hull_height),(180.0,40.0));assert!(!boat.biblio);
-            assert!((2.0..=100.0).contains(&boat.container_width));assert!((2.0..=100.0).contains(&boat.container_height));
+            assert_eq!((boat.container_width,boat.container_height),(13.5,9.5));
             assert!((1..=25).contains(&boat.rows));assert!((1..=25).contains(&boat.cols));
             kinds.insert(boat.kind_index);profiles.insert(boat.bow_fairing_kind_index);bows.insert(boat.curve_bow);
         }
