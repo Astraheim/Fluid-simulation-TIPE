@@ -229,10 +229,10 @@ impl BoatUiState {
     fn randomize(&mut self, rng: &mut impl rand::Rng) {
         self.biblio = false;
         self.kind_index = rng.random_range(0..4);
-        self.curve_bow = rng.random_bool(0.5);
-        self.curve_stern = rng.random_bool(0.5);
+        self.curve_bow = true;
+        self.curve_stern = true;
         self.hull_curvature = rng.random_range(0.0..=1.0);
-        let end_space = ((N-self.hull_width)*0.5-2.0).clamp(1.0,N*0.3);
+        let end_space = ((N-self.hull_width)*0.5-2.0).clamp(1.0,100.0);
         self.bow_length = rng.random_range(1.0..=end_space);
         self.stern_length = rng.random_range(1.0..=end_space);
         // Garder le franc-bord : avec la coque fixe, la ligne d’eau ne bouge pas.
@@ -259,8 +259,8 @@ impl BoatUiState {
         self.stern_fairing_kind_index = rng.random_range(0..7);
         self.bow_fairing_length = rng.random_range(2.0..=N*0.25);
         self.stern_fairing_length = rng.random_range(2.0..=N*0.25);
-        self.bow_fairing_height_scale = rng.random_range(0.2..=2.5);
-        self.stern_fairing_height_scale = rng.random_range(0.2..=2.5);
+        self.bow_fairing_height_scale = rng.random_range(0.2..=1.1);
+        self.stern_fairing_height_scale = rng.random_range(0.2..=1.1);
         self.bow_fairing_position = rng.random_range(0.0..=1.0);
         self.stern_fairing_position = rng.random_range(0.0..=1.0);
     }
@@ -895,7 +895,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         .default_open(true).show(ui, |ui| {
                                         ui.checkbox(&mut boat_ui.curve_bow, "Activer la proue profilée");
                                         ui.add_enabled_ui(boat_ui.curve_bow, |ui| {
-                                            ui.add(egui::Slider::new(&mut boat_ui.bow_length, 1.0..=(N * 0.3)).text("Longueur proue"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.bow_length, 1.0..=100.0).text("Longueur proue"));
                                             ui.add(egui::Slider::new(&mut boat_ui.side_profile.bow_rake, 0.0..=1.0)
                                                 .text("Inclinaison étrave"));
                                             ui.add(egui::Slider::new(&mut boat_ui.side_profile.bow_exponent, 0.2..=6.0)
@@ -910,7 +910,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         .default_open(false).show(ui, |ui| {
                                         ui.checkbox(&mut boat_ui.curve_stern, "Activer la poupe profilée");
                                         ui.add_enabled_ui(boat_ui.curve_stern, |ui| {
-                                            ui.add(egui::Slider::new(&mut boat_ui.stern_length, 1.0..=(N * 0.3)).text("Longueur poupe"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.stern_length, 1.0..=100.0).text("Longueur poupe"));
                                             ui.add(egui::Slider::new(&mut boat_ui.side_profile.stern_rake, 0.0..=1.0)
                                                 .text("Inclinaison poupe"));
                                             ui.add(egui::Slider::new(&mut boat_ui.side_profile.stern_exponent, 0.2..=6.0)
@@ -943,7 +943,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         ui.add_enabled_ui(boat_ui.add_bow_fairing, |ui| {
                                             ui.label("Réglages carénage avant");
                                             ui.add(egui::Slider::new(&mut boat_ui.bow_fairing_length, 2.0..=(N * 0.25)).text("Longueur"));
-                                            ui.add(egui::Slider::new(&mut boat_ui.bow_fairing_height_scale, 0.2..=2.5).text("Hauteur relative"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.bow_fairing_height_scale, 0.2..=1.1).text("Hauteur relative"));
                                             ui.add(egui::Slider::new(&mut boat_ui.bow_fairing_position, 0.0..=1.0)
                                                 .text("Position (0=proue, 1=conteneurs)"));
                                             egui::ComboBox::from_label("Profil carénage avant")
@@ -958,7 +958,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         ui.add_enabled_ui(boat_ui.add_stern_fairing, |ui| {
                                             ui.label("Réglages carénage arrière");
                                             ui.add(egui::Slider::new(&mut boat_ui.stern_fairing_length, 2.0..=(N * 0.25)).text("Longueur"));
-                                            ui.add(egui::Slider::new(&mut boat_ui.stern_fairing_height_scale, 0.2..=2.5).text("Hauteur relative"));
+                                            ui.add(egui::Slider::new(&mut boat_ui.stern_fairing_height_scale, 0.2..=1.1).text("Hauteur relative"));
                                             ui.add(egui::Slider::new(&mut boat_ui.stern_fairing_position, 0.0..=1.0)
                                                 .text("Position (0=conteneurs, 1=poupe)"));
                                             egui::ComboBox::from_label("Profil carénage arrière")
@@ -1419,17 +1419,21 @@ mod random_boat_tests {
         let initial_waterline=boat_waterline_overlay(&boat).y_center;
         let initial_freeboard=boat.side_profile.freeboard_ratio;
         let mut kinds=std::collections::HashSet::new();let mut profiles=std::collections::HashSet::new();
-        let mut bows=std::collections::HashSet::new();
         for _ in 0..128 {
             boat.randomize(&mut rng);
             assert_eq!((boat.hull_width,boat.hull_height),(180.0,40.0));assert!(!boat.biblio);
             assert_eq!((boat.container_width,boat.container_height),(13.5,9.5));
+            assert!(boat.curve_bow && boat.curve_stern);
+            assert!((1.0..=100.0).contains(&boat.bow_length));
+            assert!((1.0..=100.0).contains(&boat.stern_length));
+            assert!((0.2..=1.1).contains(&boat.bow_fairing_height_scale));
+            assert!((0.2..=1.1).contains(&boat.stern_fairing_height_scale));
             assert_eq!(boat.side_profile.freeboard_ratio,initial_freeboard);
             assert_eq!(boat_waterline_overlay(&boat).y_center,initial_waterline);
             assert!((1..=25).contains(&boat.rows));assert!((1..=25).contains(&boat.cols));
-            kinds.insert(boat.kind_index);profiles.insert(boat.bow_fairing_kind_index);bows.insert(boat.curve_bow);
+            kinds.insert(boat.kind_index);profiles.insert(boat.bow_fairing_kind_index);
         }
-        assert_eq!(kinds.len(),4);assert_eq!(profiles.len(),7);assert_eq!(bows.len(),2);
+        assert_eq!(kinds.len(),4);assert_eq!(profiles.len(),7);
         for size in [5.0,N*0.9] {boat.hull_width=size;boat.hull_height=size;boat.randomize(&mut rng);assert_eq!(boat.hull_width,size);}
     }
 }
