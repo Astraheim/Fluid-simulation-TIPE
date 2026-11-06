@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::fmt::Write;
 use std::ops::Mul;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default)]
 pub struct Vector2 {
     pub x: f32,
     pub y: f32,
@@ -83,6 +83,9 @@ impl Grid {
 
 #[derive(Clone, Debug)]
 pub struct Grid {
+    pub projection_iterations: usize,
+    pub projection_residual: f32,
+    pub projection_relative_residual: f32,
     pub wind_min_height: f32,
     pub realistic_wind: bool,
     pub cells: Vec<Cell>,
@@ -234,6 +237,9 @@ impl Grid {
     /// Create a new grid with the specified size (with wall if EXT_BORDER is enabled)
     pub fn new() -> Self {
         let mut grid = Self {
+            projection_iterations: 0,
+            projection_residual: 0.0,
+            projection_relative_residual: 0.0,
             wind_min_height: 0.0,
             realistic_wind: true,
             cells: vec![Cell::default(); SIZE as usize],
@@ -674,7 +680,8 @@ impl Grid {
             };
 
         let tolerance = 1e-5;
-        for _ in 0..(if ENABLE_WATER == true { WATER_PROJECT_ITERATIONS } else { 20 }) {
+        for iteration in 0..(if ENABLE_WATER == true { WATER_PROJECT_ITERATIONS } else { 20 }) {
+            self.projection_iterations = iteration + 1;
             let mut max_error: f32 = 0.0;
 
             for i in 1..=(N as usize) {
@@ -727,6 +734,28 @@ impl Grid {
                 break;
             }
         }
+
+        // Diagnostic du même opérateur à réflexion, sans changer la résolution.
+        let mut residual = 0.0_f32;
+        let mut rhs_norm = 0.0_f32;
+        for i in 1..=N as usize {
+            for j in 1..=N as usize {
+                let idx = self.to_index(i, j);
+                if self.cells[idx].wall { continue; }
+                let mut ap = 0.0;
+                for (k, (x, y)) in [(i-1,j),(i+1,j),(i,j-1),(i,j+1)].into_iter().enumerate() {
+                    if x < 1 || y < 1 || x > N as usize || y > N as usize { continue; }
+                    let neighbor = self.to_index(x,y);
+                    if self.cells[neighbor].wall { continue; }
+                    let w = if ENABLE_WATER { [&w_l_arr,&w_r_arr,&w_b_arr,&w_t_arr][k][idx] } else { 1.0 };
+                    ap += w * (pressure[idx] - pressure[neighbor]);
+                }
+                residual = residual.max((div[idx] - ap).abs());
+                rhs_norm = rhs_norm.max(div[idx].abs());
+            }
+        }
+        self.projection_residual = residual;
+        self.projection_relative_residual = residual / rhs_norm.max(1e-30);
 
         // NOUVEAU : recopier le champ de pression résolu dans les cellules,
         // afin qu'il soit exploitable ailleurs (visualisation, forces...).

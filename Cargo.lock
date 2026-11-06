@@ -1527,6 +1527,8 @@ dependencies = [
  "plotters",
  "rand",
  "rayon",
+ "serde",
+ "serde_json",
  "winit",
 ]
 

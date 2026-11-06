@@ -10,7 +10,7 @@ use crate::grid::{Grid, Vector2};
 use rand::Rng;
 use std::collections::{HashMap, HashSet};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WallKind {
     Hull,
     BowHull,
@@ -20,9 +20,10 @@ pub enum WallKind {
     SternFairing,
     /// Domaine fictif sous la ligne de flottaison (ne pas compter comme coque).
     Water,
+    Support,
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Container {
     pub id: usize,
     pub center: (isize, isize),
@@ -31,7 +32,7 @@ pub struct Container {
 }
 
 /// Paramètres historiques, préservés pour compatibilité avec app.rs.
-#[derive(Clone, Copy, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
 pub struct HullCurveSpec {
     pub curve_bow: bool,
     pub curve_stern: bool,
@@ -42,7 +43,7 @@ pub struct HullCurveSpec {
 
 /// Réglages supplémentaires de la vue de côté.
 /// Le programme principal peut les modifier ultérieurement dans egui.
-#[derive(Clone, Copy, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
 pub struct SideProfileSettings {
     /// Fraction de hauteur de coque émergée (0..1).
     pub freeboard_ratio: f32,
@@ -76,10 +77,10 @@ impl Default for SideProfileSettings {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FairingSide { Bow, Stern }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FairingProfile {
     Triangular,
     Rounded,
@@ -104,7 +105,7 @@ impl FairingProfile {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
 pub struct Fairing {
     /// Point de départ du carénage sur le pont (x_start, deck_y).
     pub position: (isize, isize),
@@ -116,17 +117,19 @@ pub struct Fairing {
     pub height_scale: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct ShipLayout {
     pub name: String,
     pub hull_rects: Vec<((isize, isize), f32, f32)>,
     pub hull_curve: Option<HullCurveSpec>,
+    #[serde(default)]
+    pub supports: Vec<((isize, isize), f32, f32)>,
     pub containers: Vec<Container>,
     pub fairings: Vec<Fairing>,
     pub flow_angle: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct LayoutResult {
     pub layout_name: String,
     pub hull_force: Vector2,
@@ -335,6 +338,13 @@ impl Grid {
             }
         }
 
+        for &(center,width,height) in &layout.supports {
+            let before: HashSet<usize> = self.cells.iter().enumerate().filter(|(_,c)|c.wall).map(|(i,_)|i).collect();
+            self.rectangle(center.0,center.1,width,height);
+            for (idx,cell) in self.cells.iter().enumerate() {
+                if cell.wall && !before.contains(&idx) { labels.insert(idx,WallKind::Support); }
+            }
+        }
         for c in &layout.containers {
             let before: HashSet<usize> = self.cells.iter().enumerate().filter(|(_, c)| c.wall).map(|(i, _)| i).collect();
             self.rectangle(c.center.0, c.center.1, c.width, c.height);
@@ -393,7 +403,7 @@ pub fn test_layout(layout: &ShipLayout, steps: usize, hole_pos: &[usize]) -> Lay
     for (&idx, &kind) in &labels {
         let f = cell_forces[idx];
         match kind {
-            WallKind::Hull | WallKind::BowHull | WallKind::SternHull | WallKind::BowFairing | WallKind::SternFairing => {
+            WallKind::Support | WallKind::Hull | WallKind::BowHull | WallKind::SternHull | WallKind::BowFairing | WallKind::SternFairing => {
                 hull_force.x += f.x;
                 hull_force.y += f.y;
             }
@@ -424,14 +434,15 @@ pub fn compare_layouts(layouts: &[ShipLayout], steps: usize, hole_pos: &[usize])
     println!("===================================================\n");
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
 pub enum ContainerLayoutKind {
     Grid { rows: usize, cols: usize },
     Pyramid { rows: usize },
     Staggered { rows: usize, cols: usize },
+    Stepped { rows: usize, cols: usize, support_height: f32 },
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug)]
 pub struct BoatParams {
     pub center: (isize, isize),
     pub hull_width: f32,
@@ -467,6 +478,7 @@ pub fn build_boat_layout(name: &str, p: &BoatParams) -> ShipLayout {
         Some(HullCurveSpec { curve_bow: p.curve_bow, curve_stern: p.curve_stern,
             curvature: p.hull_curvature, bow_length: p.bow_length, stern_length: p.stern_length })
     } else { None };
+    let mut supports = Vec::new();
     let mut containers = Vec::new();
     let mut id = 0usize;
     let top = p.center.1 - (p.hull_height / 2.0) as isize;
@@ -491,6 +503,23 @@ pub fn build_boat_layout(name: &str, p: &BoatParams) -> ShipLayout {
         }
         ContainerLayoutKind::Pyramid { rows } => {
             for r in 0..rows { push_row(r, rows.saturating_sub(r).max(1), 0.0, &mut containers, &mut id); }
+        }
+        ContainerLayoutKind::Stepped { rows, cols, support_height } => {
+            // Trois niveaux de supports pleins, et des piles croissantes vers la poupe.
+            // Les conteneurs se touchent verticalement ; seuls les passages entre travées restent libres.
+            let total = cols as f32 * step_x - p.container_gap;
+            let left = p.center.0 - (total / 2.0) as isize;
+            for col in 0..cols {
+                let level = if cols <= 1 { 0 } else { col * 2 / (cols - 1) };
+                let h = ((level + 1) as f32 * support_height.max(1.0)).round() as isize;
+                let cx = left + (col as f32 * step_x + p.container_width / 2.0) as isize;
+                supports.push(((cx, top-h/2),p.container_width,h as f32));
+                let tiers = if rows==0 {0} else {1 + col * rows.saturating_sub(1) / cols.saturating_sub(1).max(1)};
+                let support_top = top-h/2-(h as f32/2.0) as isize;
+                for row in 0..tiers {
+                    containers.push(Container{id,center:(cx,support_top-(p.container_height/2.0) as isize-row as isize*step_y),width:p.container_width,height:p.container_height}); id+=1;
+                }
+            }
         }
         ContainerLayoutKind::Staggered { rows, cols } => {
             for r in 0..rows {
@@ -543,7 +572,7 @@ pub fn build_boat_layout(name: &str, p: &BoatParams) -> ShipLayout {
             });
         }
     }
-    ShipLayout { name: name.to_string(), hull_rects, hull_curve, containers, fairings, flow_angle: p.flow_angle }
+    ShipLayout { name: name.to_string(), hull_rects, hull_curve, supports, containers, fairings, flow_angle: p.flow_angle }
 }
 
 pub fn quick_variants(base: BoatParams) -> Vec<ShipLayout> {
@@ -628,6 +657,7 @@ pub fn build_biblio_layout() -> (ShipLayout, SideProfileSettings) {
             bow_length,
             stern_length,
         }),
+        supports: Vec::new(),
         containers: Vec::new(),
         fairings: Vec::new(),
         flow_angle: 0.0,
@@ -748,6 +778,29 @@ mod boat_geometry_tests {
                     );
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stepped_layout_tests {
+    use super::*;
+    #[test]
+    fn stepped_piles_have_continuous_supports_and_no_vertical_gaps() {
+        let p=BoatParams {center:(250,250),hull_width:160.0,hull_height:30.0,
+            container_width:10.0,container_height:8.0,container_gap:4.0,
+            kind:ContainerLayoutKind::Stepped{rows:5,cols:5,support_height:5.0},
+            flow_angle:0.0,curve_bow:false,curve_stern:false,hull_curvature:0.5,bow_length:20.0,stern_length:10.0,
+            add_bow_fairing:false,add_stern_fairing:false,bow_fairing_length:10.0,stern_fairing_length:10.0,
+            bow_fairing_profile:FairingProfile::Triangular,stern_fairing_profile:FairingProfile::Triangular,
+            bow_fairing_height_scale:1.0,stern_fairing_height_scale:1.0,bow_fairing_position:0.0,stern_fairing_position:0.0};
+        let layout=build_boat_layout("etage",&p);
+        assert_eq!(layout.supports.len(),5);assert_eq!(layout.containers.len(),15);
+        let mut grid=Grid::new();let labels=grid.apply_layout_with_profile(&layout,&SideProfileSettings::default());
+        assert!(labels.values().any(|k|*k==WallKind::Support));
+        for (center,_,_) in &layout.supports {
+            let top=layout.containers.iter().filter(|c|c.center.0==center.0).map(|c|c.center.1-(c.height/2.0)as isize).min().unwrap();
+            for y in top..=p.center.1 { assert!(grid.cells[grid.to_index(center.0 as usize,y as usize)].wall,"trou sous la pile x={}, y={y}",center.0); }
         }
     }
 }

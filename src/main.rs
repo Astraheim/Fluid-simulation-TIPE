@@ -12,8 +12,10 @@ mod grid2;
 mod pressure_computation2;
 mod app;
 mod water;
+pub mod experiments;
 
 fn main() {
+    if crate::experiments::cli() { return; }
     let start = Instant::now();
     
     

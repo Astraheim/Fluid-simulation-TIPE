@@ -293,3 +293,9 @@ Important limitations include the simplified boundary conditions and turbulence 
 *Fluid mechanics · Numerical simulation · Cargo-ship aerodynamics · Container optimisation · Wind-assisted propulsion*
 
 > **License:** No open-source license is declared in this repository. Please consult the author before reuse beyond what copyright law permits.
+
+## Sauvegardes, scores et campagnes de calcul
+
+Le menu **Bateaux sauvegardés / classement** permet de sauvegarder un bateau, de copier/coller ses caractéristiques et de classer les essais selon la capacité, la traînée et les protections. Les résultats sont conservés dans `results/`. Le mode de placement **Étagé avec supports** est disponible dans le générateur.
+
+Voir [le guide des essais et du classement](EXPERIMENTS.md) pour la formule du score, les fichiers CSV/JSON, les limites physiques et les commandes de campagne sans interface.

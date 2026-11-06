@@ -18,7 +18,7 @@ Remplace run_simulation() de visualization.rs.
 */
 
 /// Champ affiché dans la grille.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq)]
 enum DisplayMode {
     Density,
     Vorticity,
@@ -28,7 +28,7 @@ enum DisplayMode {
 }
 
 /// Forme à stamper au centre de la grille lors d'un redémarrage.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq)]
 enum ShapeKind {
     None,
     Triangle,
@@ -45,7 +45,7 @@ struct WaterlineOverlay {
 
 /// Configuration de flux/scénario appliquée lors d'un redémarrage, et
 /// réappliquée chaque frame pour l'injection de densité/vitesse.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq)]
 enum ConfigKind {
     /// Tunnel de vent classique (coffre gauche percé, flux horizontal).
     ClassicFlow,
@@ -57,6 +57,7 @@ enum ConfigKind {
 }
 
 /// État des champs du panneau "Scénario / Réinitialisation".
+#[derive(serde::Serialize, serde::Deserialize)]
 struct ScenarioUiState {
     shape: ShapeKind,
     shape_size: f32,
@@ -78,6 +79,7 @@ impl Default for ScenarioUiState {
 }
 
 /// Paramètres modifiables sans recréer la grille.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SimParams {
     pub flow_velocity: f32,
     pub wind_min_height: f32,
@@ -187,6 +189,7 @@ impl TickHistory {
 }
 
 /// État des champs du panneau "Générateur de bateau".
+#[derive(serde::Serialize, serde::Deserialize)]
 struct BoatUiState {
     biblio: bool,
     hull_width: f32,
@@ -194,6 +197,8 @@ struct BoatUiState {
     container_width: f32,
     container_height: f32,
     container_gap: f32,
+    #[serde(default = "default_support_height")]
+    support_height: f32,
     kind_index: usize, // 0 = Grille, 1 = Pyramide, 2 = Quinconce
     rows: usize,
     cols: usize,
@@ -222,6 +227,8 @@ struct BoatUiState {
     random_batch_size: usize,
 }
 
+fn default_support_height() -> f32 { 4.0 }
+
 impl Default for BoatUiState {
     fn default() -> Self {
         Self {
@@ -231,6 +238,7 @@ impl Default for BoatUiState {
             container_width: 10.0,
             container_height: 8.0,
             container_gap: 3.0,
+            support_height: 4.0,
             kind_index: 0,
             rows: 4,
             cols: 7,
@@ -307,20 +315,7 @@ fn tunnel_hole_positions() -> Vec<usize> {
 }
 
 fn inject_tunnel_wind(grid: &mut Grid, density: f32, flow_velocity: f32) {
-    let left_wall = 1;
-    let box_width = (N as usize / 30).max(2);
-    let right_wall = left_wall + box_width;
-
-    for i in (left_wall + 2)..=right_wall.saturating_sub(5) {
-        for j in 1..=N as usize {
-            let idx = grid.to_index(i, j);
-            if grid.cells[idx].wall {
-                continue;
-            }
-            let wf = grid.inlet_profile_factor(j);
-            grid.cell_init(i, j, flow_velocity * wf, 0.0, if wf > 0.0 { density } else { 0.0 });
-        }
-    }
+    crate::experiments::inject(grid, density, flow_velocity);
 }
 
 /// Convertit la densité en couleur (reprend density_color de visualization.rs)
@@ -651,7 +646,7 @@ pub fn run_app(mut grid: Grid) -> ! {
     let mut pixels = Pixels::new(grid_w as u32, grid_h as u32, surface_texture).unwrap();
 
     // --- Setup egui ---
-    let mut egui_ctx = Context::default();
+    let egui_ctx = Context::default();
     let mut egui_winit = egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, None, None);
     let mut egui_renderer = EguiRenderer::new(pixels.device(), pixels.render_texture_format(), None, 1);
 
@@ -681,12 +676,16 @@ pub fn run_app(mut grid: Grid) -> ! {
     setup_config(&mut grid, scenario.config, &hole_pos, initial_waterline.y_center);
 
     let mut keyboard_apply_boat = false;
+    let mut experiments = crate::experiments::Panel::default();
+    let mut simulation_rect = egui::Rect::NOTHING;
+    let mut simulation_texture: Option<egui::TextureHandle> = None;
 
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { event, .. } => {
                 let response = egui_winit.on_window_event(&window, &event);
                 if response.consumed {
+                    if matches!(event, WindowEvent::MouseInput { state: winit::event::ElementState::Released, .. }) { mouse_down=false;last_grid_pos=None;line_anchor=None; }
                     // egui a géré l'événement (clic sur un slider, etc.)
                 } else if let WindowEvent::KeyboardInput { event: key, .. } = event {
                     if key.state == winit::event::ElementState::Pressed && !key.repeat {
@@ -743,7 +742,10 @@ pub fn run_app(mut grid: Grid) -> ! {
                         }
                     }
                 } else if let WindowEvent::CursorMoved { position, .. } = event {
-                    if let Ok((gx, gy)) = pixels.window_pos_to_pixel((position.x as f32, position.y as f32)) {
+                    let pos = egui::pos2(position.x as f32 / window.scale_factor() as f32, position.y as f32 / window.scale_factor() as f32);
+                    if simulation_rect.contains(pos) {
+                        let gx = ((pos.x - simulation_rect.left()) / simulation_rect.width() * grid_w as f32) as usize;
+                        let gy = ((pos.y - simulation_rect.top()) / simulation_rect.height() * grid_h as f32) as usize;
                         if gx >= 1 && gx <= N as usize && gy >= 1 && gy <= N as usize {
                             last_cursor_pixel = Some((gx, gy));
 
@@ -766,12 +768,14 @@ pub fn run_app(mut grid: Grid) -> ! {
                     let mut apply_boat = std::mem::take(&mut keyboard_apply_boat);
                     let mut apply_random_boat = false;
                     let mut do_restart = false;
+                    let mut experiment_action = None;
 
                     let raw_input = egui_winit.take_egui_input(&window);
-                    let full_output = egui_ctx.run(raw_input, |ctx| {
-                        egui::SidePanel::right("controls").show(ctx, |ui| {
+                    let mut full_output = egui_ctx.run(raw_input, |ctx| {
+                        egui::SidePanel::left("controls").default_width(350.0).width_range(260.0..=500.0).resizable(true).show(ctx, |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 ui.heading("Simulation de vent — vue de côté");
+                                experiment_action = experiments.show(ui);
                                 ui.small("Raccourcis : Espace = pause · R = appliquer bateau · 1 à 5 = champs affichés");
                                 egui::CollapsingHeader::new("Paramètres physiques")
                                     .default_open(false).show(ui, |ui| {
@@ -934,13 +938,15 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         ui.add(egui::Slider::new(&mut boat_ui.container_height, 2.0..=100.0).text("Hauteur conteneur"));
                                         ui.add(egui::Slider::new(&mut boat_ui.container_gap, 0.0..=40.0).text("Espacement horizontal des travées"));
                                         egui::ComboBox::from_label("Organisation")
-                                            .selected_text(match boat_ui.kind_index { 0 => "Grille", 1 => "Pyramide", _ => "Quinconce" })
+                                            .selected_text(match boat_ui.kind_index { 0 => "Grille", 1 => "Pyramide", 2 => "Quinconce", _ => "Étagé avec supports" })
                                             .show_ui(ui, |ui| {
                                                 ui.selectable_value(&mut boat_ui.kind_index, 0, "Grille");
                                                 ui.selectable_value(&mut boat_ui.kind_index, 1, "Pyramide");
                                                 ui.selectable_value(&mut boat_ui.kind_index, 2, "Quinconce");
+                                                ui.selectable_value(&mut boat_ui.kind_index, 3, "Étagé avec supports");
                                             });
                                         ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=25).text("Rangées"));
+                                        if boat_ui.kind_index == 3 { ui.add(egui::Slider::new(&mut boat_ui.support_height, 1.0..=20.0).text("Hauteur des gradins")); }
                                         if boat_ui.kind_index != 1 {
                                             ui.add(egui::Slider::new(&mut boat_ui.cols, 1..=25).text("Colonnes"));
                                         }
@@ -1064,6 +1070,15 @@ pub fn run_app(mut grid: Grid) -> ! {
                                 }); // fin section traînée/couple
                             });
                         });
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let image = egui::ColorImage::from_rgba_unmultiplied([grid_w,grid_h],pixels.frame());
+                            if let Some(texture) = &mut simulation_texture { texture.set(image,egui::TextureOptions::NEAREST); }
+                            else { simulation_texture = Some(ctx.load_texture("simulation",image,egui::TextureOptions::NEAREST)); }
+                            let side = ui.available_width().min(ui.available_height()).max(1.0);
+                            let area = ui.available_rect_before_wrap();
+                            simulation_rect = egui::Rect::from_center_size(area.center(),egui::vec2(side,side));
+                            ui.put(simulation_rect,egui::Image::new((simulation_texture.as_ref().unwrap().id(),egui::vec2(side,side))));
+                        });
                     });
 
                     // --- 2. Redémarrage "scénario" (forme + configuration de flux) ---
@@ -1084,7 +1099,8 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let kind = match boat_ui.kind_index {
                             0 => ContainerLayoutKind::Grid { rows: boat_ui.rows, cols: boat_ui.cols },
                             1 => ContainerLayoutKind::Pyramid { rows: boat_ui.rows },
-                            _ => ContainerLayoutKind::Staggered { rows: boat_ui.rows, cols: boat_ui.cols },
+                            2 => ContainerLayoutKind::Staggered { rows: boat_ui.rows, cols: boat_ui.cols },
+                            _ => ContainerLayoutKind::Stepped { rows: boat_ui.rows, cols: boat_ui.cols, support_height: boat_ui.support_height },
                         };
                         BoatParams {
                             center: (N as isize / 2, N as isize / 2),
@@ -1161,6 +1177,62 @@ pub fn run_app(mut grid: Grid) -> ! {
                         });
                     }
 
+                    // Capturer les murs réellement appliqués, pas seulement les curseurs du générateur.
+                    let capture = |grid: &Grid, labels: &HashMap<usize,WallKind>, params: &SimParams,
+                                   boat: &BoatUiState, scenario: &ScenarioUiState, panel: &crate::experiments::Panel, waterline: f32| {
+                        let mut c = crate::experiments::Config::capture(grid,labels);
+                        c.name=panel.name.clone(); c.speed=params.flow_velocity; c.density=params.flow_density;
+                        c.wind_height=params.wind_min_height; c.realistic_wind=params.realistic_wind;
+                        c.waterline=waterline; c.warmup=panel.warmup; c.measure=panel.measure;
+                        c.ui=serde_json::json!({"params":params,"boat":boat,"scenario":scenario}); c
+                    };
+                    if let Some(action)=experiment_action {
+                        use crate::experiments::{Action,Config,Recorder};
+                        let result=(|| -> Result<(),Box<dyn std::error::Error>> {
+                            match action {
+                                Action::Stop => { if let Some(mut r)=experiments.recorder.take(){r.finish("interrupted")?;} experiments.status="Essai arrêté, données conservées hors classement".into(); },
+                                Action::Export | Action::Save | Action::Start => {
+                                    if scenario.config!=ConfigKind::ClassicFlow {return Err("Les sauvegardes d’essais concernent le tunnel de vent. Sélectionne ce mode.".into());}
+                                    let c=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center);c.validate()?;
+                                    match action {
+                                        Action::Export => {experiments.text=c.text()?;full_output.platform_output.copied_text=experiments.text.clone();},
+                                        Action::Save => experiments.save(&c)?,
+                                        Action::Start => {
+                                            if c.counts().0==0 {return Err("Applique un bateau avec conteneurs avant de le classer.".into());}
+                                            let (g,l)=c.grid()?; let r=Recorder::new(c,std::path::Path::new(&experiments.root))?;
+                                            grid=g;boat_labels=l;experiments.recorder=Some(r);params.paused=false;history.clear();step=0;
+                                            experiments.status="Mesure en cours ; toute modification physique interrompt l’essai.".into();
+                                        },_=>unreachable!()
+                                    }
+                                },
+                                Action::Import | Action::Load(_) => {
+                                    let c=match action {Action::Load(c)=>c,_=>Config::parse(&experiments.text)?};
+                                    let (g,l)=c.grid()?;
+                                    // Tout valider avant de modifier l’état de l’interface.
+                                    let saved_ui=if c.ui.is_null(){None}else{Some((
+                                        serde_json::from_value::<SimParams>(c.ui["params"].clone())?,
+                                        serde_json::from_value::<BoatUiState>(c.ui["boat"].clone())?,
+                                        serde_json::from_value::<ScenarioUiState>(c.ui["scenario"].clone())?))};
+                                    if let Some(mut r)=experiments.recorder.take(){r.finish("interrupted")?;}
+                                    if let Some((p,b,s))=saved_ui {params=p;boat_ui=b;scenario=s;}
+                                    grid=g;boat_labels=l;params.flow_velocity=c.speed;params.flow_density=c.density;
+                                    params.wind_min_height=c.wind_height;params.realistic_wind=c.realistic_wind;params.paused=true;
+                                    scenario.config=ConfigKind::ClassicFlow;active_waterline.y_center=c.waterline;
+                                    experiments.name=c.name.clone();experiments.warmup=c.warmup;experiments.measure=c.measure;
+                                    experiments.text=c.text()?;history.clear();step=0;mouse_down=false;line_anchor=None;last_cursor_pixel=None;
+                                    experiments.status="Bateau rechargé à zéro, en pause. Géométrie exacte restaurée.".into();
+                                }
+                            } Ok(())
+                        })();if let Err(e)=result {experiments.status=e.to_string();}
+                    }
+                    // Un essai ne mélange jamais plusieurs géométries ou réglages.
+                    if let Some(r)=&experiments.recorder {
+                        let now=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center);
+                        if do_restart || apply_boat || apply_random_boat || scenario.config!=ConfigKind::ClassicFlow || now.bands!=r.config.bands || now.speed!=r.config.speed || now.density!=r.config.density || now.wind_height!=r.config.wind_height || now.realistic_wind!=r.config.realistic_wind || now.waterline!=r.config.waterline {
+                            if let Some(mut r)=experiments.recorder.take(){experiments.status=match r.finish("interrupted"){Ok(_)=>"Réglages modifiés : essai interrompu, hors classement.".into(),Err(e)=>e.to_string()};}
+                        }
+                    }
+
                     // --- 4. Pas de simulation (normal ou manuel via "Step"), avec
                     //        mesure du temps de calcul du tick ---
                     if !params.paused || do_step {
@@ -1169,6 +1241,21 @@ pub fn run_app(mut grid: Grid) -> ! {
                         inject_for_config(&mut grid, scenario.config, &params, &scenario, active_waterline);
                         grid.vel2_step(params.flow_velocity);
                         step += 1;
+                        // Écrire les données avant leur affichage et les courbes.
+                        let mut completed=false;
+                        if let Some(r)=&mut experiments.recorder {
+                            match r.sample(&mut grid,&boat_labels,tick_start.elapsed().as_secs_f64()*1000.0) {
+                                Ok(done)=>completed=done,
+                                Err(e)=>{experiments.status=e.to_string();completed=true;}
+                            }
+                        }
+                        if completed {
+                            if let Some(r)=experiments.recorder.take(){experiments.protocol=format!("{}{}",crate::experiments::source_id(),r.config.protocol());}
+                            params.paused=true; let previous=experiments.status.clone();experiments.refresh();
+                            let mut ranked:Vec<_>=experiments.entries.iter().filter(|e|format!("{}{}",e.source,e.config.protocol())==experiments.protocol).cloned().collect();
+                            ranked.sort_by(|a,b|experiments.weights.score(b).total_cmp(&experiments.weights.score(a)));
+                            experiments.status=match crate::experiments::save_ranking(std::path::Path::new(&experiments.root),&ranked,&experiments.weights){Ok(())=>format!("Essai terminé ou interrompu. {} résultats disponibles. {}",ranked.len(),previous),Err(e)=>e.to_string()};
+                        }
 
                         let objects = grid.compute_object_forces();
                         history.push(&objects);
@@ -1199,7 +1286,7 @@ pub fn run_app(mut grid: Grid) -> ! {
 
                     // --- 7. Rendu combiné pixels + egui ---
                     let render_result = pixels.render_with(|encoder, render_target, context| {
-                        context.scaling_renderer.render(encoder, render_target);
+                        // La simulation est une texture egui dans la zone centrale, à droite du menu.
 
                         let current_size = window.inner_size();
                         let screen_descriptor = ScreenDescriptor {
@@ -1215,7 +1302,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                 view: render_target,
                                 resolve_target: None,
-                                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
                             })],
                             depth_stencil_attachment: None,
                             timestamp_writes: None,
