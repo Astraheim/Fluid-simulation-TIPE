@@ -4,8 +4,8 @@
 
 1. Construire un bateau, puis **Appliquer bateau**. L'organisation **Étagé avec supports** crée des piles croissantes vers la poupe sur trois niveaux de supports pleins ; « Rangées » règle le maximum de niveaux, « Colonnes » les travées, et « Hauteur des gradins » les supports. Il n'y a pas de vide entre conteneurs superposés.
 2. Ouvrir **Bateaux sauvegardés / classement**, donner un nom, puis **Sauvegarder bateau**. Le dossier `results/boats/` conserve les configurations même après fermeture.
-3. **Copier caractéristiques** produit un code JSON copiable. Coller ce code dans le champ et cliquer sur **Charger le code** restaure les réglages et la géométrie réellement appliquée, y compris les bateaux aléatoires et les murs dessinés. Le bateau redémarre à zéro, en pause. Ce n'est pas une sauvegarde du champ de vitesse en cours.
-4. Régler les pas de stabilisation et de mesure, puis **Mesurer et classer**. L'essai repart de zéro, écrit chaque pas et s'arrête automatiquement. Une modification physique interrompt l'essai et l'exclut du classement ; une pause ou un changement de couleur ne l'invalide pas.
+3. **Copier caractéristiques** produit un code JSON copiable. Coller ce code dans le champ et cliquer sur **Charger le code** restaure les réglages et la géométrie réellement appliquée, y compris les bateaux aléatoires et les murs dessinés. Le champ de code est repliable, sa hauteur est limitée avec un défilement interne, et il se replie automatiquement après copie ou chargement. Le bateau redémarre à zéro, en pause. Ce n'est pas une sauvegarde du champ de vitesse en cours.
+4. Régler les pas de stabilisation et de mesure, puis **Mesurer et classer**. L'essai repart de zéro, accumule les statistiques en mémoire et s'arrête automatiquement. Une modification physique interrompt l'essai et l'exclut du classement ; une pause ou un changement de couleur ne l'invalide pas.
 5. Les essais terminés apparaissent du meilleur au moins bon, avec **Charger** et **Copier**. Changer les poids recalcule immédiatement le classement. **Enregistrer ce classement / ces poids** conserve ce choix dans `results/ranking.json` ; la fin d'un essai enregistre également le classement courant.
 
 Le menu occupe sa propre zone à gauche et la simulation carrée s'ajuste à la place disponible à droite, y compris après agrandissement. Le dessin à la souris utilise les coordonnées de cette zone.
@@ -33,18 +33,21 @@ Chaque essai crée un dossier unique `results/run_…/` sans écraser les préc�
 |---|---|
 | `config.json` | Réglages et géométrie exacte rechargeable, version du format, grille, pas de temps et origine du code |
 | `manifest.json` | Empreinte des sources, compilateur/cible, constantes de `conditions.rs`, dépendances et conventions |
-| `samples.csv` | Une ligne par pas, écrite et vidée du tampon avant l'affichage |
-| `summary.csv` | Une ligne de synthèse : moyenne et écart type échantillonnal de chaque mesure sur la fenêtre demandée |
-| `summary.json` | Même synthèse, statut et configuration complète pour le classement |
-| `score.json` | Score avec les poids par défaut, formule et statut ; `ranking.json` utilise les poids choisis dans le menu |
+| `summary.json` | Synthèse unique : moyennes, écarts types, statut, nombre de pas, temps, quantités de murs, configuration et score avec sa formule et ses poids |
 
-Les colonnes comprennent : pas, temps numérique, appartenance à la fenêtre de mesure, Fx, Fy, couple, traînée des conteneurs, maximum absolu du potentiel de pression, vitesse maximale au centre des cellules, résidu absolu/relatif du Poisson, itérations, débits gauche/droite, flux sortant net sur les quatre côtés, durée du pas (injection + simulation, sans rendu ni écriture), divergence finale maximale, Cx/Cy indicatifs, conteneurs et quantités de cellules solides.
+Les statistiques comprennent : Fx, Fy, couple, traînée des conteneurs, maximum absolu du potentiel de pression, vitesse maximale au centre des cellules, résidu absolu/relatif du Poisson, itérations, débits gauche/droite, flux sortant net sur les quatre côtés, durée du pas (injection + simulation, sans rendu ni écriture), divergence finale maximale, Cx/Cy indicatifs, conteneurs et quantités de cellules solides.
 
-`Cx_proxy` et `Cy_proxy` valent `F / (0,5 rho_air U² Lref)` avec `Lref = 1` (longueur normalisée du domaine, profondeur unitaire). À vitesse nulle, les cases restent vides. Les forces reprennent le modèle historique du programme : potentiel de pression et terme de traînée empirique. **Ces coefficients ne sont pas des coefficients aérodynamiques SI validés.** Le potentiel est celui de la projection avant advection ; les vitesses sont celles de la fin du pas. Les axes sont x vers la droite et y vers le bas. Le couple est calculé autour du centre fixe du domaine, avec bras de levier divisés par N ; c'est un moment dans la vue de côté, pas un moment de lacet 3D.
+`Cx_proxy` et `Cy_proxy` valent `F / (0,5 rho_air U² Lref)` avec `Lref = 1` (longueur normalisée du domaine, profondeur unitaire). À vitesse nulle, ces coefficients ne sont pas calculés. Les forces reprennent le modèle historique du programme : potentiel de pression et terme de traînée empirique. **Ces coefficients ne sont pas des coefficients aérodynamiques SI validés.** Le potentiel est celui de la projection avant advection ; les vitesses sont celles de la fin du pas. Les axes sont x vers la droite et y vers le bas. Le couple est calculé autour du centre fixe du domaine, avec bras de levier divisés par N ; c'est un moment dans la vue de côté, pas un moment de lacet 3D.
 
 La géométrie et les étiquettes évitent de compter la boîte d'injection ou le domaine bloqué sous l'eau dans les forces du bateau. Le solveur et sa boîte d'injection sont conservés ; seul le diagnostic du résidu a été ajouté. Les maxima de champ et le bilan de débit concernent tout le domaine fluide.
 
-Fermer normalement pendant un essai conserve les lignes déjà écrites avec le statut `interrupted`. Un arrêt brutal peut laisser `running` : les CSV restent récupérables, mais ces essais ne sont pas classés. Une valeur non finie exclut également l'essai. Les fichiers sont locaux au dossier de lancement, pas synchronisés automatiquement par Git.
+Fermer normalement pendant un essai écrit la synthèse des mesures accumulées avec le statut `interrupted`. Un arrêt brutal peut laisser seulement la synthèse initiale `running` : les mesures en mémoire sont alors perdues et l’essai n’est pas classé. Il n’y a plus d’écriture de fichier à chaque pas. Une valeur non finie exclut également l'essai. Les fichiers sont locaux au dossier de lancement, pas synchronisés automatiquement par Git. Les anciens essais restent lisibles ; leurs anciens fichiers ne sont pas supprimés.
+
+Le score aux poids par défaut se trouve dans `summary.json`, sous `score`. Le classement global `ranking.json` conserve les poids choisis dans le menu. Il reste donc trois fichiers par nouvel essai : `config.json`, `manifest.json` et `summary.json`.
+
+### À quoi sert le manifest ?
+
+`config.json` décrit le bateau et les réglages. `manifest.json` décrit le **programme qui a réalisé le calcul** : empreinte des sources, compilateur et architecture, constantes non réglables dans le menu, versions des dépendances, modèle de forces, unités/conventions et état initial. Il permet de comprendre pourquoi un même bateau pourrait donner un résultat différent après une modification du code. Il est écrit une seule fois au démarrage de l’essai et n’est pas nécessaire pour charger un bateau dans le menu.
 
 ## Campagne sans interface
 

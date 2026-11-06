@@ -1195,7 +1195,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                     if scenario.config!=ConfigKind::ClassicFlow {return Err("Les sauvegardes d’essais concernent le tunnel de vent. Sélectionne ce mode.".into());}
                                     let c=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center);c.validate()?;
                                     match action {
-                                        Action::Export => {experiments.text=c.text()?;full_output.platform_output.copied_text=experiments.text.clone();},
+                                        Action::Export => {experiments.text=c.text()?;experiments.code_expanded=false;full_output.platform_output.copied_text=experiments.text.clone();},
                                         Action::Save => experiments.save(&c)?,
                                         Action::Start => {
                                             if c.counts().0==0 {return Err("Applique un bateau avec conteneurs avant de le classer.".into());}
@@ -1219,7 +1219,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                     params.wind_min_height=c.wind_height;params.realistic_wind=c.realistic_wind;params.paused=true;
                                     scenario.config=ConfigKind::ClassicFlow;active_waterline.y_center=c.waterline;
                                     experiments.name=c.name.clone();experiments.warmup=c.warmup;experiments.measure=c.measure;
-                                    experiments.text=c.text()?;history.clear();step=0;mouse_down=false;line_anchor=None;last_cursor_pixel=None;
+                                    experiments.text=c.text()?;experiments.code_expanded=false;history.clear();step=0;mouse_down=false;line_anchor=None;last_cursor_pixel=None;
                                     experiments.status="Bateau rechargé à zéro, en pause. Géométrie exacte restaurée.".into();
                                 }
                             } Ok(())
@@ -1241,7 +1241,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                         inject_for_config(&mut grid, scenario.config, &params, &scenario, active_waterline);
                         grid.vel2_step(params.flow_velocity);
                         step += 1;
-                        // Écrire les données avant leur affichage et les courbes.
+                        // Accumuler les statistiques avant leur affichage et les courbes.
                         let mut completed=false;
                         if let Some(r)=&mut experiments.recorder {
                             match r.sample(&mut grid,&boat_labels,tick_start.elapsed().as_secs_f64()*1000.0) {

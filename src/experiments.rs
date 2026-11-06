@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
-    io::{BufWriter, Write},
+    io::Write,
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -322,7 +322,6 @@ pub struct Recorder {
     pub config: Config,
     pub folder: PathBuf,
     pub step: usize,
-    writer: BufWriter<File>,
     stats: BTreeMap<String, Stats>,
     done: bool,
 }
@@ -340,18 +339,10 @@ impl Recorder {
                 &serde_json::json!({"source":source_id(),"conditions_rs":include_str!("conditions.rs"),"cargo_lock":include_str!("../Cargo.lock"),"force_model":"legacy pressure potential + empirical normal drag; not SI", "axes":"x right, y down; torque about domain centre, lever arm / N", "initial_state":"zero velocities/density, phase from waterline", "coefficient_reference":"rho=RHO_AIR; U=input slider; Lref=1 grid domain; Cx,Cy proxies only", "pressure_phase":"projection before advection; velocities after complete step", "counts":config.counts()}),
             )?,
         )?;
-        let mut writer = BufWriter::new(File::create(folder.join("samples.csv"))?);
-        writeln!(
-            writer,
-            "step,time,measurement,{},Cx_proxy,Cy_proxy,containers,protection_cells,ship_wall_cells,total_wall_cells",
-            METRICS.join(",")
-        )?;
-        writer.flush()?;
         let mut r = Self {
             config,
             folder,
             step: 0,
-            writer,
             stats: BTreeMap::new(),
             done: false,
         };
@@ -359,7 +350,6 @@ impl Recorder {
         Ok(r)
     }
     fn summary(&mut self, status: &str) -> Result<Entry> {
-        self.writer.flush()?;
         let e = Entry {
             config: self.config.clone(),
             folder: self.folder.to_string_lossy().into(),
@@ -368,34 +358,37 @@ impl Recorder {
             stats: self.stats.clone(),
             source: source_id(),
         };
-        fs::write(
-            self.folder.join("score.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "status":status,"weights":Weights::default(),"score":if e.samples>0 {Some(Weights::default().score(&e))}else{None},
-                "formula":"wN*N/Nref - wD*abs(mean(Fx))/Dref - wP*protection_cells/Pref",
-                "note":"Default weights. UI ranking.json records the chosen weights; only completed runs are ranked."
-            }))?,
+        let mut document = serde_json::to_value(&e)?;
+        document["score"] = serde_json::json!({
+            "weights":Weights::default(),
+            "value":if e.samples>0 {Some(Weights::default().score(&e))}else{None},
+            "formula":"wN*N/Nref - wD*abs(mean(Fx))/Dref - wP*protection_cells/Pref",
+            "note":"Default weights; ranking.json records the weights chosen in the menu."
+        });
+        document["statistics"] = serde_json::to_value(
+            self.stats
+                .iter()
+                .map(|(k, s)| {
+                    (
+                        k.clone(),
+                        serde_json::json!({"mean":s.mean,"std":s.sd(),"samples":s.n}),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>(),
         )?;
+        document["steps"] = serde_json::json!(self.step);
+        document["time"] = serde_json::json!(self.step as f64 * DT as f64);
+        document["counts"] = serde_json::json!({"containers":self.config.counts().0,
+            "protection_cells":self.config.counts().1,"ship_wall_cells":self.config.counts().2,
+            "total_wall_cells":self.config.counts().3});
         let tmp = self.folder.join("summary.tmp");
-        fs::write(&tmp, serde_json::to_vec_pretty(&e)?)?;
+        fs::write(&tmp, serde_json::to_vec_pretty(&document)?)?;
         // Le fichier final n'est jamais lu pendant l'écriture.
         let dest = self.folder.join("summary.json");
         if cfg!(windows) && dest.exists() {
             fs::remove_file(&dest)?;
         }
         fs::rename(tmp, dest)?;
-        let mut f = BufWriter::new(File::create(self.folder.join("summary.csv"))?);
-        write!(f, "status,samples")?;
-        for k in self.stats.keys() {
-            write!(f, ",{k}_mean,{k}_std")?;
-        }
-        writeln!(f)?;
-        write!(f, "{status},{}", e.samples)?;
-        for s in self.stats.values() {
-            write!(f, ",{},{}", s.mean, s.sd())?;
-        }
-        writeln!(f)?;
-        f.flush()?;
         Ok(e)
     }
     pub fn finish(&mut self, status: &str) -> Result<Entry> {
@@ -478,22 +471,13 @@ impl Recorder {
         }
         self.step += 1;
         let measure = self.step > self.config.warmup;
-        write!(
-            self.writer,
-            "{},{},{}",
-            self.step,
-            self.step as f64 * DT as f64,
-            measure
-        )?;
         for (k, v) in METRICS.iter().zip(values) {
-            write!(self.writer, ",{v}")?;
             if measure {
                 self.stats.entry(k.to_string()).or_default().push(v);
             }
         }
         let q = 0.5 * RHO_AIR as f64 * (self.config.speed as f64).powi(2);
         if q > 0.0 {
-            write!(self.writer, ",{},{}", fx / q, fy / q)?;
             if measure {
                 self.stats
                     .entry("Cx_proxy".into())
@@ -504,12 +488,7 @@ impl Recorder {
                     .or_default()
                     .push(fy / q);
             }
-        } else {
-            write!(self.writer, ",,")?;
         }
-        let (n, p, s, a) = self.config.counts();
-        writeln!(self.writer, ",{n},{p},{s},{a}")?;
-        self.writer.flush()?;
         if self.step >= self.config.warmup + self.config.measure {
             self.finish("completed")?;
             return Ok(true);
@@ -670,13 +649,31 @@ mod tests {
         let a = run(c.clone(), &root).unwrap();
         let b = run(c.clone(), &root).unwrap();
         assert_eq!(a.samples, 2);
+        let files: HashSet<_> = fs::read_dir(&a.folder)
+            .unwrap()
+            .map(|p| p.unwrap().file_name().into_string().unwrap())
+            .collect();
         assert_eq!(
-            fs::read_to_string(Path::new(&a.folder).join("samples.csv"))
-                .unwrap()
-                .lines()
-                .count(),
-            4
+            files,
+            ["config.json", "manifest.json", "summary.json"]
+                .into_iter()
+                .map(String::from)
+                .collect()
         );
+        let document: serde_json::Value =
+            serde_json::from_slice(&fs::read(Path::new(&a.folder).join("summary.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            document["score"]["value"].as_f64(),
+            Some(Weights::default().score(&a))
+        );
+        assert_eq!(
+            document["statistics"]["Fx"]["std"].as_f64(),
+            Some(a.stats["Fx"].sd())
+        );
+        // Les anciennes synthèses sans champ score restent chargeables.
+        let legacy = serde_json::to_value(&a).unwrap();
+        assert!(serde_json::from_value::<Entry>(legacy).is_ok());
         assert!(!a.stats.contains_key("Cx_proxy"));
         for (k, v) in &a.stats {
             if k != "step_ms" {
@@ -714,6 +711,7 @@ pub enum Action {
 }
 pub struct Panel {
     pub text: String,
+    pub code_expanded: bool,
     pub name: String,
     pub status: String,
     pub root: String,
@@ -729,6 +727,7 @@ impl Default for Panel {
     fn default() -> Self {
         let mut p = Self {
             text: String::new(),
+            code_expanded: false,
             name: "Mon bateau".into(),
             status: String::new(),
             root: "results".into(),
@@ -777,9 +776,14 @@ impl Panel {
         egui::CollapsingHeader::new("Bateaux sauvegardés / classement").default_open(true).show(ui,|ui|{
             ui.horizontal(|ui|{ui.label("Nom");ui.text_edit_singleline(&mut self.name);});
             ui.horizontal(|ui|{if ui.button("Copier caractéristiques").clicked(){action=Some(Action::Export);}if ui.button("Sauvegarder bateau").clicked(){action=Some(Action::Save);}});
-            ui.label("Colle ici le code d’un bateau, puis Charger :");
-            ui.add(egui::TextEdit::multiline(&mut self.text).desired_rows(2).desired_width(f32::INFINITY));
-            if ui.button("Charger le code (depuis zéro)").clicked(){action=Some(Action::Import);}
+            ui.toggle_value(&mut self.code_expanded, "Afficher / masquer le code du bateau");
+            if self.code_expanded {
+                ui.label("Colle ici le code d’un bateau, puis Charger :");
+                egui::ScrollArea::vertical().id_source("boat_code_scroll").max_height(120.0).show(ui, |ui| {
+                    ui.add(egui::TextEdit::multiline(&mut self.text).desired_rows(3).desired_width(f32::INFINITY));
+                });
+                if ui.button("Charger le code (depuis zéro)").clicked(){action=Some(Action::Import);}
+            }
             egui::ComboBox::from_id_source("saved_boats").selected_text("Charger un bateau sauvegardé…").show_ui(ui,|ui|{for(name,c)in &self.saved{if ui.selectable_label(false,name).clicked(){action=Some(Action::Load(c.clone()));}}});
             ui.separator();ui.label("Essai reproductible — tunnel de vent");
             ui.add(egui::DragValue::new(&mut self.warmup).clamp_range(0..=1_000_000).prefix("Stabilisation : ").suffix(" pas"));
@@ -811,7 +815,7 @@ impl Panel {
                 let(n,p,_,_)=e.config.counts();let drag=&e.stats["Fx"];
                 ui.label(format!("{n} conteneurs · Fx {:.5} ± {:.5} · {p} cellules de protection",drag.mean,drag.sd()));
                 ui.small(format!("Résidu moyen {:.2e} · {}",e.stats.get("poisson_residual").map_or(0.0,|s|s.mean),e.folder));
-                ui.horizontal(|ui|{if ui.button(format!("Charger #{}",rank+1)).clicked(){action=Some(Action::Load(e.config.clone()));}if ui.button(format!("Copier #{}",rank+1)).clicked(){if let Ok(t)=e.config.text(){self.text=t.clone();ui.output_mut(|o|o.copied_text=t);}}});
+                ui.horizontal(|ui|{if ui.button(format!("Charger #{}",rank+1)).clicked(){action=Some(Action::Load(e.config.clone()));}if ui.button(format!("Copier #{}",rank+1)).clicked(){if let Ok(t)=e.config.text(){self.text=t.clone();self.code_expanded=false;ui.output_mut(|o|o.copied_text=t);}}});
             }
             ui.label(&self.status);
         });

@@ -298,4 +298,4 @@ Important limitations include the simplified boundary conditions and turbulence 
 
 Le menu **Bateaux sauvegardés / classement** permet de sauvegarder un bateau, de copier/coller ses caractéristiques et de classer les essais selon la capacité, la traînée et les protections. Les résultats sont conservés dans `results/`. Le mode de placement **Étagé avec supports** est disponible dans le générateur.
 
-Voir [le guide des essais et du classement](EXPERIMENTS.md) pour la formule du score, les fichiers CSV/JSON, les limites physiques et les commandes de campagne sans interface.
+Voir [le guide des essais et du classement](EXPERIMENTS.md) pour la formule du score, les fichiers JSON, les limites physiques et les commandes de campagne sans interface.
