@@ -346,7 +346,17 @@ pub fn entries(root: &Path) -> Result<Vec<Entry>> {
     for dir in fs::read_dir(root)? {
         let p = dir?.path().join("summary.json");
         if p.is_file() {
-            let e: Entry = serde_json::from_slice(&fs::read(&p)?)?;
+            let mut document: serde_json::Value = serde_json::from_slice(&fs::read(&p)?)?;
+            // Les nouvelles synthèses ne dupliquent plus la géométrie.
+            // Les anciennes restent autonomes avec leur configuration intégrée.
+            if document.get("config").is_none() {
+                let config = Config::parse(&fs::read_to_string(p.with_file_name("config.json"))?)?;
+                document["config"] = serde_json::to_value(config)?;
+            }
+            // Le dossier peut avoir été déplacé depuis l'enregistrement.
+            document["folder"] = serde_json::json!(p.parent().unwrap().to_string_lossy());
+            let e: Entry = serde_json::from_value(document)?;
+
             if e.status == "completed"
                 && e.samples >= 2
                 && e.stats.contains_key("Fx")
@@ -437,7 +447,12 @@ impl Recorder {
             stats: self.stats.clone(),
             source: source_id(),
         };
-        let mut document = serde_json::to_value(&e)?;
+        let mut document = serde_json::json!({
+            "status": e.status,
+            "samples": e.samples,
+            "stats": e.stats,
+            "source": e.source,
+        });
         document["cargo_assessment"] = serde_json::json!({"max_tiers":crate::cargo_safety::tiers(&self.config),"tier_limit":crate::cargo_safety::MAX_TIERS,"access_proxy":crate::cargo_safety::access(&self.config),"peak_overturning_or_lift_ratio":self.peak_safety_ratio,"force_check":if self.peak_safety_ratio.is_some(){"calibrated_exploratory_model"}else{"not_evaluated_uncalibrated"},"assumptions":"individual unlashed boxes; no ship motions, sliding, support or stack-load validation"});
         document["manifest"] = serde_json::json!(self.manifest);
         document["score"] = serde_json::json!({
@@ -750,6 +765,9 @@ mod tests {
         let a = run(c.clone(), &root).unwrap();
         let b = run(c.clone(), &root).unwrap();
         assert_eq!(a.samples, 2);
+        let compact: serde_json::Value = serde_json::from_slice(&fs::read(Path::new(&a.folder).join("summary.json")).unwrap()).unwrap();
+        assert!(compact.get("config").is_none());
+        assert!(compact.get("folder").is_none());
         assert_eq!(fs::read_dir(root.join("manifests")).unwrap().count(), 1);
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(Path::new(&a.folder).join("summary.json")).unwrap())
@@ -782,8 +800,28 @@ mod tests {
             Some(a.stats["Fx"].sd())
         );
         // Les anciennes synthèses sans champ score restent chargeables.
-        let legacy = serde_json::to_value(&a).unwrap();
-        assert!(serde_json::from_value::<Entry>(legacy).is_ok());
+        let mut legacy = serde_json::to_value(&a).unwrap();
+        legacy["folder"] = serde_json::json!("ancien/emplacement");
+        fs::write(
+            Path::new(&a.folder).join("summary.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        // Ancien format autonome, même sans config.json adjacent.
+        fs::remove_file(Path::new(&a.folder).join("config.json")).unwrap();
+        let loaded = entries(&root).unwrap();
+        assert_eq!(loaded.len(), 2);
+        for original in [&a, &b] {
+            let restored = loaded.iter().find(|e| e.folder == original.folder).unwrap();
+            assert_eq!(
+                restored.config.text().unwrap(),
+                original.config.text().unwrap()
+            );
+            assert_eq!(
+                Weights::default().score(restored),
+                Weights::default().score(original)
+            );
+        }
         assert!(!a.stats.contains_key("Cx_proxy"));
         for (k, v) in &a.stats {
             if k != "step_ms" {
