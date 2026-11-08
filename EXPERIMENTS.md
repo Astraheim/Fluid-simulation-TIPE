@@ -91,3 +91,46 @@ Le bouton **Tester et classer un bateau aléatoire** conserve le minimum de 50 c
 `score maximal possible = poids_capacité × N/Nref − poids_protections × P/Pref`
 
 La pénalité de traînée est au mieux nulle. Si ce majorant ne dépasse pas le meilleur score enregistré, le candidat est éliminé sans simulation. Sinon, son aérodynamique doit encore être mesurée. Ce filtre utilise les poids actuels et les quantités réellement présentes dans la grille ; il ne prouve pas le réalisme physique et ne suppose pas qu’une protection importante soit forcément inutile. Sans résultat de référence dans le groupe, un candidat ayant au moins 50 conteneurs peut être testé. Si aucun des 64 candidats ne passe, aucun essai n’est lancé et le bateau précédent est conservé. Le bouton de génération simple et les essais manuels restent disponibles sans ce filtre de score.
+
+## Conteneurs : critères exploratoires (novembre 2026)
+
+- Limite de modèle : **10 étages**, contrôlée sur la géométrie enregistrée,
+  y compris les imports et les anciens résultats. Les tirages et le curseur
+  respectent cette limite ; les essais au-dessus sont exclus. Ce n'est pas une
+  résistance certifiée : certains navires atteignent 11–12 étages avec arrimage.
+- Deux bonus réglables (0,1 chacun par défaut) :
+  `abri = 1 / (1 + moyenne_des_normes_des_forces_par_conteneur / Dref)` et
+  `accès = fraction des conteneurs bordant une bande verticale libre`.
+  La bande représente 10 % de la largeur discrétisée du conteneur et doit être
+  libre depuis le sommet du chargement jusqu'au bas du conteneur. Cela ne prouve
+  ni l'accès aux portes ni le passage d'une grue. La protection mutuelle entre
+  conteneurs compte aussi comme abri : aucun bonus arbitraire pour un carénage.
+  Les anciennes mesures sans effort individuel n'obtiennent pas le bonus d'abri :
+  refaire leurs essais pour comparer ce critère. Le majorant de présélection
+  inclut les bonus afin de ne pas éliminer un candidat pouvant gagner.
+- Stabilité : forces de chaque cellule intégrées en moments autour des deux
+  arêtes inférieures de chaque conteneur ; poids appliqué au centre.
+  Rejet si moment déstabilisant >= `m*g*b/2`, ou portance >= `m*g`.
+  Une force horizontale à mi-hauteur donne `Fcrit = m*g*b/h`.
+  Le contrôle porte sur chaque pas, stabilisation comprise, pas sur une moyenne.
+- **Les forces historiques ne sont pas SI.** `Calibration N/unité = 0` signifie
+  « non évalué », jamais « sûr ». Saisir une conversion établie par calibration
+  avant d'activer l'exclusion physique. Une simple multiplication ne valide pas
+  le solveur. Le classement indique le statut et le résumé garde le pic du ratio.
+  Par défaut : 15 000 kg (hypothèse, pas une moyenne statistique), base 6,058 m
+  dans le sens du vent longitudinal, hauteur 2,591 m, conteneur standard 20 pieds.
+  Pour un vent transversal utiliser la largeur de base 2,438 m. Modifier ces
+  dimensions physiques ne redimensionne pas la grille.
+- Modèle de boîte individuelle sans arrimage, glissement, transfert d'efforts
+  entre conteneurs, vérification des appuis, compression de pile ou mouvement du
+  navire. Ce contrôle n'est donc pas une validation de sécurité maritime.
+- Les paramètres sont enregistrés avec chaque bateau ; ils ne créent pas de
+  nouveaux groupes : seuls coque et vitesse continuent à séparer les classements.
+
+Références consultées :
+- Hapag-Lloyd, 20' Standard : exemple de tare 2 350 kg et masse brute maximale
+  30 480 kg (la masse chargée dépend du contenu).
+  https://www.hapag-lloyd.com/en/services-information/cargo-fleet/container/20-standard.html
+- Présentation CMA Ships hébergée par l'OMI : capacités de navires avec 11–12
+  étages, à distinguer d'une limite universelle de gerbage.
+  https://wwwcdn.imo.org/localresources/en/OurWork/Environment/Documents/Symposium%202021/Presentations/First%20day%20-%20Blocks%201%20and%202/Symposium%20presentations%20-%20First%20Day/Block%201.1%20-%20Xavier%20Leclercq_CMA%20SHIPS%20operating%20LNG-fuelled%20containerships.pdf

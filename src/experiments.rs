@@ -19,6 +19,8 @@ pub struct Band {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
+    pub safety: crate::cargo_safety::Safety,
     pub version: u32,
     pub name: String,
     pub n: usize,
@@ -67,6 +69,7 @@ impl Config {
             }
         }
         Self {
+            safety: crate::cargo_safety::Safety::default(),
             version: 1,
             source: source_id(),
             name: "Bateau".into(),
@@ -85,6 +88,9 @@ impl Config {
         }
     }
     pub fn validate(&self) -> Result<()> {
+        if !self.safety.valid() {
+            return Err("Paramètres de sécurité invalides".into());
+        }
         if self.version != 1 || self.n != N as usize || self.dt != DT {
             return Err("Version, grille ou pas de temps incompatible".into());
         }
@@ -277,6 +283,10 @@ pub struct Entry {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Weights {
+    #[serde(default = "small_bonus")]
+    pub shelter: f64,
+    #[serde(default = "small_bonus")]
+    pub access: f64,
     pub capacity: f64,
     pub drag: f64,
     pub protection: f64,
@@ -284,9 +294,14 @@ pub struct Weights {
     pub drag_ref: f64,
     pub protection_ref: f64,
 }
+fn small_bonus() -> f64 {
+    0.1
+}
 impl Default for Weights {
     fn default() -> Self {
         Self {
+            shelter: 0.1,
+            access: 0.1,
             capacity: 1.0,
             drag: 1.0,
             protection: 1.0,
@@ -301,11 +316,19 @@ impl Weights {
     pub fn optimistic_score(&self, config: &Config) -> f64 {
         let (n, p, _, _) = config.counts();
         self.capacity * n as f64 / self.capacity_ref.max(1.0)
+            + self.shelter.max(0.0)
+            + self.access * crate::cargo_safety::access(config)
             - self.protection * p as f64 / self.protection_ref.max(1.0)
     }
     pub fn score(&self, e: &Entry) -> f64 {
         let (n, p, _, _) = e.config.counts();
+        let sheltered = e
+            .stats
+            .get("container_load_mean_abs")
+            .map_or(0.0, |s| 1.0 / (1.0 + s.mean / self.drag_ref.max(1e-12)));
         self.capacity * n as f64 / self.capacity_ref.max(1.0)
+            + self.shelter * sheltered
+            + self.access * crate::cargo_safety::access(&e.config)
             - self.drag * e.stats["Fx"].mean.abs() / self.drag_ref.max(1e-12)
             - self.protection * p as f64 / self.protection_ref.max(1.0)
     }
@@ -324,7 +347,11 @@ pub fn entries(root: &Path) -> Result<Vec<Entry>> {
         let p = dir?.path().join("summary.json");
         if p.is_file() {
             let e: Entry = serde_json::from_slice(&fs::read(&p)?)?;
-            if e.status == "completed" && e.samples >= 2 && e.stats.contains_key("Fx") {
+            if e.status == "completed"
+                && e.samples >= 2
+                && e.stats.contains_key("Fx")
+                && crate::cargo_safety::tiers(&e.config) <= crate::cargo_safety::MAX_TIERS
+            {
                 out.push(e);
             }
         }
@@ -347,10 +374,15 @@ pub struct Recorder {
     stats: BTreeMap<String, Stats>,
     done: bool,
     manifest: String,
+    cargo_bounds: BTreeMap<usize, crate::cargo_safety::Bounds>,
+    peak_safety_ratio: Option<f64>,
 }
 impl Recorder {
     pub fn new(config: Config, root: &Path) -> Result<Self> {
         config.validate()?;
+        if crate::cargo_safety::tiers(&config) > crate::cargo_safety::MAX_TIERS {
+            return Err("Bateau invalide : plus de 10 étages de conteneurs".into());
+        }
         fs::create_dir_all(root)?;
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let folder = root.join(format!("run_{stamp}_{}", std::process::id()));
@@ -384,6 +416,8 @@ impl Recorder {
         }
         let manifest = format!("../manifests/{filename}");
         let mut r = Self {
+            cargo_bounds: crate::cargo_safety::bounds(&config),
+            peak_safety_ratio: None,
             config,
             folder,
             step: 0,
@@ -404,11 +438,12 @@ impl Recorder {
             source: source_id(),
         };
         let mut document = serde_json::to_value(&e)?;
+        document["cargo_assessment"] = serde_json::json!({"max_tiers":crate::cargo_safety::tiers(&self.config),"tier_limit":crate::cargo_safety::MAX_TIERS,"access_proxy":crate::cargo_safety::access(&self.config),"peak_overturning_or_lift_ratio":self.peak_safety_ratio,"force_check":if self.peak_safety_ratio.is_some(){"calibrated_exploratory_model"}else{"not_evaluated_uncalibrated"},"assumptions":"individual unlashed boxes; no ship motions, sliding, support or stack-load validation"});
         document["manifest"] = serde_json::json!(self.manifest);
         document["score"] = serde_json::json!({
             "weights":Weights::default(),
             "value":if e.samples>0 {Some(Weights::default().score(&e))}else{None},
-            "formula":"wN*N/Nref - wD*abs(mean(Fx))/Dref - wP*protection_cells/Pref",
+            "formula":"wN*N/Nref - wD*abs(mean(Fx))/Dref - wP*protection_cells/Pref + wS/(1+mean_container_load/Dref) + wA*access_proxy",
             "note":"Default weights; ranking.json records the weights chosen in the menu."
         });
         document["statistics"] = serde_json::to_value(
@@ -449,6 +484,19 @@ impl Recorder {
         ms: f64,
     ) -> Result<bool> {
         let forces = g.compute_wall_forces();
+        let (cargo_load, ratio) =
+            crate::cargo_safety::loads(&self.config, g, labels, &forces, &self.cargo_bounds);
+        if !cargo_load.is_finite() || ratio.is_some_and(|r| !r.is_finite()) {
+            self.finish("non_finite")?;
+            return Err("Effort conteneur non fini".into());
+        }
+        if let Some(ratio) = ratio {
+            self.peak_safety_ratio = Some(self.peak_safety_ratio.unwrap_or(0.0).max(ratio));
+            if ratio >= 1.0 {
+                self.finish("invalid_cargo_load")?;
+                return Err("Bateau invalide : seuil de basculement ou soulèvement atteint (modèle calibré)".into());
+            }
+        }
         let (mut fx, mut fy, mut torque, mut containers) = (0.0, 0.0, 0.0, 0.0);
         // Ordre déterministe, indépendant de l'ordre aléatoire du HashMap.
         let mut indices: Vec<_> = labels.keys().copied().collect();
@@ -517,6 +565,12 @@ impl Recorder {
         }
         self.step += 1;
         let measure = self.step > self.config.warmup;
+        if measure {
+            self.stats
+                .entry("container_load_mean_abs".into())
+                .or_default()
+                .push(cargo_load);
+        }
         for (k, v) in METRICS.iter().zip(values) {
             if measure {
                 self.stats.entry(k.to_string()).or_default().push(v);
@@ -700,9 +754,11 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(Path::new(&a.folder).join("summary.json")).unwrap())
                 .unwrap();
-        assert!(Path::new(&a.folder)
-            .join(saved["manifest"].as_str().unwrap())
-            .is_file());
+        assert!(
+            Path::new(&a.folder)
+                .join(saved["manifest"].as_str().unwrap())
+                .is_file()
+        );
         let files: HashSet<_> = fs::read_dir(&a.folder)
             .unwrap()
             .map(|p| p.unwrap().file_name().into_string().unwrap())
@@ -832,10 +888,7 @@ mod tests {
             .bands
             .retain(|b| !matches!(b.kind, Some(WallKind::BowHull | WallKind::SternHull)));
         assert!(panel.candidate_can_win(&promising));
-        assert_eq!(
-            panel.weights.optimistic_score(&winner),
-            panel.weights.score(&panel.entries[0])
-        );
+        assert!(panel.weights.optimistic_score(&winner) >= panel.weights.score(&panel.entries[0]));
         // Une forte traînée mesurée laisse sa chance à un bateau moins chargé.
         panel.entries[0].stats.get_mut("Fx").unwrap().mean = 100.0;
         bad.speed = winner.speed;
@@ -869,6 +922,7 @@ pub struct Panel {
     pub warmup: usize,
     pub measure: usize,
     pub weights: Weights,
+    pub safety: crate::cargo_safety::Safety,
     pub entries: Vec<Entry>,
     pub protocol: String,
     pub recorder: Option<Recorder>,
@@ -886,6 +940,7 @@ impl Default for Panel {
             warmup: 300,
             measure: 600,
             weights: Weights::default(),
+            safety: crate::cargo_safety::Safety::default(),
             entries: Vec::new(),
             protocol: String::new(),
             recorder: None,
@@ -952,6 +1007,18 @@ impl Panel {
             }
             egui::ComboBox::from_id_source("saved_boats").selected_text("Charger un bateau sauvegardé…").show_ui(ui,|ui|{for(name,c)in &self.saved{if ui.selectable_label(false,name).clicked(){action=Some(Action::Load(c.clone()));}}});
             ui.separator();ui.label("Essai reproductible — tunnel de vent");
+            egui::CollapsingHeader::new("Conteneurs : stabilité et hypothèses").show(ui,|ui| {
+                ui.label("10 étages maximum. Modèle individuel sans arrimage, glissement ni mouvements du navire.");
+                ui.add_enabled_ui(self.recorder.is_none(), |ui| {
+                    ui.add(egui::DragValue::new(&mut self.safety.mass_kg).clamp_range(1.0..=100000.0).prefix("Masse par conteneur (kg) : "));
+                    ui.add(egui::DragValue::new(&mut self.safety.base_m).clamp_range(0.1..=30.0).prefix("Base dans le sens du vent (m) : "));
+                    ui.add(egui::DragValue::new(&mut self.safety.height_m).clamp_range(0.1..=10.0).prefix("Hauteur (m) : "));
+                    ui.add(egui::DragValue::new(&mut self.safety.newtons_per_unit).clamp_range(0.0..=1e12).prefix("Calibration N/unité (0 = inconnue) : "));
+                });
+                ui.small("15 t est une hypothèse de chargement, pas une masse moyenne mesurée. Base 6,058 m : vent longitudinal sur un 20 pieds.");
+                ui.label(format!("Seuil théorique, force horizontale à mi-hauteur : {:.0} N",self.safety.centre_force_limit()));
+                if self.safety.newtons_per_unit==0.0 {ui.colored_label(egui::Color32::YELLOW,"Basculement non évalué : forces numériques non calibrées.");}
+            });
             ui.add(egui::DragValue::new(&mut self.warmup).clamp_range(0..=1_000_000).prefix("Stabilisation : ").suffix(" pas"));
             ui.add(egui::DragValue::new(&mut self.measure).clamp_range(2..=1_000_000).prefix("Mesure : ").suffix(" pas"));
             if let Some(r)=&self.recorder{ui.label(format!("Essai : {} / {} pas",r.step,r.config.warmup+r.config.measure));if ui.button("Arrêter (hors classement)").clicked(){action=Some(Action::Stop);}}
@@ -968,8 +1035,8 @@ impl Panel {
         egui::Window::new("Classements des bateaux").open(&mut open)
             .default_width(620.0).default_height(500.0).vscroll(true).show(ui.ctx(), |ui| {
             ui.separator();
-            ui.label("Score maximal = capacité − traînée − protections");
-            for(label,v)in [("Poids capacité",&mut self.weights.capacity),("Poids traînée",&mut self.weights.drag),("Poids protections",&mut self.weights.protection)]{ui.add(egui::Slider::new(v,0.0..=10.0).text(label));}
+            ui.label("Score = capacité − traînée − protections + abri + accès");
+            for(label,v)in [("Poids capacité",&mut self.weights.capacity),("Poids traînée",&mut self.weights.drag),("Poids protections",&mut self.weights.protection),("Bonus abri",&mut self.weights.shelter),("Bonus accès",&mut self.weights.access)]{ui.add(egui::Slider::new(v,0.0..=10.0).text(label));}
             egui::CollapsingHeader::new("Échelles du score / dossier").show(ui,|ui|{
                 ui.add(egui::DragValue::new(&mut self.weights.capacity_ref).clamp_range(1.0..=1e6).prefix("Conteneurs de référence : "));
                 ui.add(egui::DragValue::new(&mut self.weights.drag_ref).clamp_range(1e-6..=1e6).speed(0.01).prefix("Traînée de référence : "));
@@ -995,7 +1062,7 @@ impl Panel {
             if ui.button("Enregistrer ce classement / ces poids").clicked(){let rows:Vec<_>=ranked.iter().map(|e|(*e).clone()).collect();self.status=match save_ranking(Path::new(&self.root),&rows,&self.weights){Ok(())=>"Classement enregistré dans ranking.json".into(),Err(e)=>e.to_string()};}
             egui::ScrollArea::horizontal().show(ui, |ui| {
                 egui::Grid::new("ranking_table").striped(true).show(ui, |ui| {
-                    for title in ["Rang", "Bateau", "Score", "Conteneurs", "Traînée", "Protections", "Actions"] { ui.strong(title); }
+                    for title in ["Rang", "Bateau", "Score", "Conteneurs", "Traînée", "Protections", "Stabilité", "Actions"] { ui.strong(title); }
                     ui.end_row();
                     for (rank,e) in ranked.iter().enumerate() {
                         let (n,p,_,_) = e.config.counts();
@@ -1006,6 +1073,7 @@ impl Panel {
                         ui.label(n.to_string());
                         ui.label(format!("{:.5}",drag.mean)).on_hover_text(format!("Écart type : {:.5}",drag.sd()));
                         ui.label(p.to_string());
+                        ui.label(if e.config.safety.newtons_per_unit>0.0 && e.stats.contains_key("container_load_mean_abs") {"Vérifiée (modèle)"}else{"Non évaluée"});
                         ui.push_id(rank, |ui| { ui.horizontal(|ui| {
                             if ui.button("Charger").clicked() { action=Some(Action::Load(e.config.clone())); }
                             if ui.button("Copier").clicked() {

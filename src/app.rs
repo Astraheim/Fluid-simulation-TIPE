@@ -235,7 +235,7 @@ impl BoatUiState {
         for kind in 0..4 {
             let stack_space = if kind==3 {space-3.0*support_height} else {space};
             let mut layouts = Vec::new();
-            for rows in 1..=25usize {
+            for rows in 1..=crate::cargo_safety::MAX_TIERS {
                 if rows as f32*self.container_height>stack_space {continue;}
                 for cols in 1..=25usize {
                     if kind==1 && cols!=rows {continue;}
@@ -962,7 +962,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                                 ui.selectable_value(&mut boat_ui.kind_index, 2, "Quinconce");
                                                 ui.selectable_value(&mut boat_ui.kind_index, 3, "Étagé avec supports");
                                             });
-                                        ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=25).text("Rangées"));
+                                        ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=crate::cargo_safety::MAX_TIERS).text("Rangées"));
                                         if boat_ui.kind_index == 3 { ui.add(egui::Slider::new(&mut boat_ui.support_height, 1.0..=20.0).text("Hauteur des gradins")); }
                                         if boat_ui.kind_index != 1 {
                                             ui.add(egui::Slider::new(&mut boat_ui.cols, 1..=25).text("Colonnes"));
@@ -1222,7 +1222,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     let capture = |grid: &Grid, labels: &HashMap<usize,WallKind>, params: &SimParams,
                                    boat: &BoatUiState, scenario: &ScenarioUiState, panel: &crate::experiments::Panel, waterline: f32, hull_size: Option<(f32,f32)>| {
                         let mut c = crate::experiments::Config::capture(grid,labels);
-                        c.hull_size=hull_size; c.name=panel.name.clone(); c.speed=params.flow_velocity; c.density=params.flow_density;
+                        c.safety=panel.safety.clone(); c.hull_size=hull_size; c.name=panel.name.clone(); c.speed=params.flow_velocity; c.density=params.flow_density;
                         c.wind_height=params.wind_min_height; c.realistic_wind=params.realistic_wind;
                         c.waterline=waterline; c.warmup=panel.warmup; c.measure=panel.measure;
                         c.ui=serde_json::json!({"params":params,"boat":boat,"scenario":scenario}); c
@@ -1261,7 +1261,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                     grid=g;boat_labels=l;params.flow_velocity=c.speed;params.flow_density=c.density;
                                     params.wind_min_height=c.wind_height;params.realistic_wind=c.realistic_wind;params.paused=true;
                                     scenario.config=ConfigKind::ClassicFlow;active_waterline.y_center=c.waterline;
-                                    experiments.name=c.name.clone();experiments.warmup=c.warmup;experiments.measure=c.measure;
+                                    experiments.safety=c.safety.clone();experiments.name=c.name.clone();experiments.warmup=c.warmup;experiments.measure=c.measure;
                                     experiments.text=c.text()?;experiments.code_expanded=false;history.clear();step=0;wall_brush=WallBrush::default();
                                     experiments.status="Bateau rechargé à zéro, en pause. Géométrie exacte restaurée.".into();
                                 }
@@ -1488,7 +1488,7 @@ mod random_boat_tests {
             assert!((0.2..=1.1).contains(&boat.stern_fairing_height_scale));
             assert_eq!(boat.side_profile.freeboard_ratio,initial_freeboard);
             assert_eq!(boat_waterline_overlay(&boat).y_center,initial_waterline);
-            assert!((1..=25).contains(&boat.rows));assert!((1..=25).contains(&boat.cols));
+            assert!((1..=crate::cargo_safety::MAX_TIERS).contains(&boat.rows));assert!((1..=25).contains(&boat.cols));
             let count=match boat.kind_index {
                 1=>boat.rows*(boat.rows+1)/2,
                 3=>(0..boat.cols).map(|c|1+c*(boat.rows-1)/(boat.cols-1).max(1)).sum(),

@@ -13,6 +13,7 @@ mod pressure_computation2;
 mod app;
 mod water;
 pub mod experiments;
+pub mod cargo_safety;
 
 fn main() {
     if crate::experiments::cli() { return; }
