@@ -792,6 +792,11 @@ pub fn run_app(mut grid: Grid) -> ! {
                         egui::SidePanel::left("controls").default_width(350.0).width_range(260.0..=500.0).resizable(true).show(ctx, |ui| {
                             egui::ScrollArea::vertical().show(ui, |ui| {
                                 ui.heading("Simulation de vent — vue de côté");
+                                ui.label(format!("Projection : {} · {} itérations", if grid.projection_converged {"convergée"} else {"non convergée / non calculée"}, grid.projection_iterations));
+                                ui.small(format!("Divergence max : avant {:.3e} → après {:.3e} ; fin {:.3e}",grid.divergence_before_projection,grid.divergence_after_projection,grid.divergence_end_step));
+                                if grid.projection_incompatible_divergence > PROJECTION_ABS_DIVERGENCE_TOLERANCE {
+                                    ui.colored_label(egui::Color32::YELLOW,"Flux aux frontières incompatibles avec la projection de Neumann.");
+                                }
                                 experiment_action = experiments.show(ui);
                                 ui.small("Raccourcis : Espace = pause · R = appliquer bateau · 1 à 5 = champs affichés");
                                 egui::CollapsingHeader::new("Paramètres physiques")
