@@ -136,3 +136,23 @@ Références consultées :
   https://wwwcdn.imo.org/localresources/en/OurWork/Environment/Documents/Symposium%202021/Presentations/First%20day%20-%20Blocks%201%20and%202/Symposium%20presentations%20-%20First%20Day/Block%201.1%20-%20Xavier%20Leclercq_CMA%20SHIPS%20operating%20LNG-fuelled%20containerships.pdf
 
 Le classement recharge le `config.json` du même dossier pour retrouver le bateau. Conserver les deux fichiers ensemble lors du déplacement d’un essai. Les anciennes synthèses avec configuration intégrée restent lisibles ; le chemin du dossier est déterminé à la lecture.
+
+## Stabilité : limite réglable, glissement et piles à 130 km/h
+
+Le maximum d'étages est maintenant réglable de 1 à 100 dans **Conteneurs : stabilité et hypothèses** (10 par défaut). Il s'applique au générateur et à l'admission des nouveaux essais. La dérogation des bateaux rechargés sans modification de géométrie est conservée. La limite utilisée est enregistrée avec l'essai.
+
+Le contrôle exploratoire du vent est activé par défaut : vent d'entrée de **130 km/h**, masse totale **15 000 kg par conteneur**, conteneur 20 pieds de **6,058 × 2,438 × 2,591 m**, masse volumique de l'air 1,225 kg/m³. Le coefficient de traînée **Cd = 1,2** et le frottement statique **μ = 0,3** sont des hypothèses réglables, pas des valeurs mesurées pour ce bateau. Le réglage de vent physique définit l'équivalent de la vitesse numérique d'entrée ; il ne modifie pas le solveur.
+
+Pour chaque conteneur, on estime F = ½ ρ Cd S v², avec S = largeur perpendiculaire au vent × hauteur. La vitesse locale physique est estimée par |u_x local| / U entrée × V physique. On prend le maximum des vitesses horizontales sur la couronne fluide voisine du conteneur (une cellule), hors eau. C'est une estimation dépendante du maillage, **pas une conversion calibrée des forces numériques**. Si l'entrée numérique vaut zéro, ce contrôle n'est pas évalué.
+
+Les conteneurs alignés et jointifs sont regroupés verticalement (mêmes limites horizontales, tolérance d'une cellule entre deux boîtes). À chaque interface, on considère toutes les boîtes jointives au-dessus :
+- début de glissement si somme(F) ≥ μ × masse supportée × g ;
+- début de perte de contact/équilibre si somme(F × hauteur du centre au-dessus de l'interface) ≥ masse supportée × g × base/2.
+
+Les forces sont supposées de même sens : enveloppe conservative. Les masses sont centrées, les boîtes de même masse et de mêmes dimensions physiques. Les piles décalées ou non jointives ne sont pas réunies par ce modèle. Il ne décrit ni twistlocks, ni arrimage, ni roulis, ni déformation, ni déplacement en mètres, ni angle d'inclinaison.
+
+Un dépassement, y compris pendant la stabilisation, interrompt l'essai avec le statut `invalid_cargo_wind`, le sauvegarde et l'exclut du classement. Les pics des rapports glissement/équilibre sont enregistrés dans `summary.json`. Le contrôle supplémentaire des forces numériques reste disponible uniquement avec une calibration N/unité explicitement fournie. La dérogation de hauteur ne désactive aucun contrôle d'efforts.
+
+À 130 km/h, dans le sens longitudinal de la vue actuelle : environ **6 054 N par boîte**, seuil de glissement individuel **44 145 N** pour μ=0,3. Pour 10 boîtes identiquement exposées, le seuil de perte d'équilibre correspond à **34 405 N par boîte**. La pile reste donc sous les deux seuils dans ces hypothèses. En vue transversale (base 2,438 m, largeur exposée 6,058 m), on obtient environ **15 044 N par boîte**, contre **13 846 N par boîte** au seuil d'équilibre de la pile de 10 : elle serait exclue. Une vue transversale exige aussi une géométrie de simulation transversale cohérente ; changer les nombres ne transforme pas la vue longitudinale en étude 3D.
+
+Sources : [dimensions extérieures Triton](https://tools.tritoncontainer.com/tritoncontainer/unitSpecs/fleet), [équation de traînée NASA](https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/drag-equation/). Les seuils proviennent des bilans statiques de forces et de moments ci-dessus.

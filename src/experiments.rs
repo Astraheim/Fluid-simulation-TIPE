@@ -365,7 +365,7 @@ pub fn entries(root: &Path) -> Result<Vec<Entry>> {
                 && e.samples >= 2
                 && e.stats.contains_key("Fx")
                 && (e.config.saved_height_exemption
-                    || crate::cargo_safety::tiers(&e.config) <= crate::cargo_safety::MAX_TIERS)
+                    || crate::cargo_safety::tiers(&e.config) <= e.config.safety.max_tiers)
             {
                 out.push(e);
             }
@@ -391,14 +391,21 @@ pub struct Recorder {
     manifest: String,
     cargo_bounds: BTreeMap<usize, crate::cargo_safety::Bounds>,
     peak_safety_ratio: Option<f64>,
+    peak_wind_force_n: Option<f64>,
+    peak_rocking_ratio: Option<f64>,
+    peak_sliding_ratio: Option<f64>,
 }
 impl Recorder {
     pub fn new(config: Config, root: &Path) -> Result<Self> {
         config.validate()?;
         if !config.saved_height_exemption
-            && crate::cargo_safety::tiers(&config) > crate::cargo_safety::MAX_TIERS
+            && crate::cargo_safety::tiers(&config) > config.safety.max_tiers
         {
-            return Err("Bateau invalide : plus de 10 étages de conteneurs".into());
+            return Err(format!(
+                "Bateau invalide : plus de {} étages de conteneurs",
+                config.safety.max_tiers
+            )
+            .into());
         }
         fs::create_dir_all(root)?;
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
@@ -435,6 +442,9 @@ impl Recorder {
         let mut r = Self {
             cargo_bounds: crate::cargo_safety::bounds(&config),
             peak_safety_ratio: None,
+            peak_wind_force_n: None,
+            peak_rocking_ratio: None,
+            peak_sliding_ratio: None,
             config,
             folder,
             step: 0,
@@ -460,7 +470,18 @@ impl Recorder {
             "stats": e.stats,
             "source": e.source,
         });
-        document["cargo_assessment"] = serde_json::json!({"max_tiers":crate::cargo_safety::tiers(&self.config),"tier_limit":crate::cargo_safety::MAX_TIERS,"height_limit_waived":self.config.saved_height_exemption,"access_proxy":crate::cargo_safety::access(&self.config),"peak_overturning_or_lift_ratio":self.peak_safety_ratio,"force_check":if self.peak_safety_ratio.is_some(){"calibrated_exploratory_model"}else{"not_evaluated_uncalibrated"},"assumptions":"individual unlashed boxes; no ship motions, sliding, support or stack-load validation"});
+        document["cargo_assessment"] = serde_json::json!({"max_tiers":crate::cargo_safety::tiers(&self.config),"tier_limit":self.config.safety.max_tiers,"height_limit_waived":self.config.saved_height_exemption,"access_proxy":crate::cargo_safety::access(&self.config),"peak_overturning_or_lift_ratio":self.peak_safety_ratio,"force_check":if self.peak_safety_ratio.is_some(){"calibrated_exploratory_model"}else{"not_evaluated_uncalibrated"},"assumptions":"individual unlashed boxes; no ship motions, sliding, support or stack-load validation"});
+        document["wind_estimate"] = serde_json::json!({
+            "model":"local_horizontal_velocity_ratio; Cd hypothesis; aligned contacting stacks; no lashings; static friction and loss of contact",
+            "wind_kmh":self.config.safety.wind_kmh,
+            "reference_force_n":self.config.safety.wind_force(self.config.safety.wind_kmh / 3.6),
+            "single_box_rocking_force_n":self.config.safety.centre_force_limit(),
+            "single_box_sliding_force_n":self.config.safety.friction*self.config.safety.mass_kg*9.81,
+            "peak_force_n":self.peak_wind_force_n,
+            "peak_rocking_ratio":self.peak_rocking_ratio,
+            "peak_sliding_ratio":self.peak_sliding_ratio,
+            "evaluated":self.peak_rocking_ratio.is_some()
+        });
         document["manifest"] = serde_json::json!(self.manifest);
         document["score"] = serde_json::json!({
             "weights":Weights::default(),
@@ -505,6 +526,40 @@ impl Recorder {
         labels: &HashMap<usize, WallKind>,
         ms: f64,
     ) -> Result<bool> {
+        if let Some((force, slip, ratio)) =
+            crate::cargo_safety::wind_estimate(&self.config, g, &self.cargo_bounds)
+        {
+            if !force.is_finite() || !ratio.is_finite() || !slip.is_finite() {
+                self.finish("non_finite")?;
+                return Err("Estimation du vent non finie : essai exclu du classement".into());
+            }
+            if self.step >= self.config.warmup {
+                self.stats
+                    .entry("wind_sliding_ratio".into())
+                    .or_default()
+                    .push(slip);
+                self.stats
+                    .entry("wind_rocking_ratio".into())
+                    .or_default()
+                    .push(ratio);
+            }
+            self.peak_sliding_ratio = Some(self.peak_sliding_ratio.unwrap_or(0.0).max(slip));
+            self.peak_wind_force_n = Some(self.peak_wind_force_n.unwrap_or(0.0).max(force));
+            self.peak_rocking_ratio = Some(self.peak_rocking_ratio.unwrap_or(0.0).max(ratio));
+            if ratio >= 1.0 || slip >= 1.0 {
+                self.finish("invalid_cargo_wind")?;
+                return Err(format!(
+                    "Bateau éliminé : {} (rapport {:.2} ≥ 1, modèle simplifié)",
+                    if slip >= 1.0 {
+                        "glissement"
+                    } else {
+                        "perte d’équilibre de pile"
+                    },
+                    slip.max(ratio)
+                )
+                .into());
+            }
+        }
         let forces = g.compute_wall_forces();
         let (cargo_load, ratio) =
             crate::cargo_safety::loads(&self.config, g, labels, &forces, &self.cargo_bounds);
@@ -1099,16 +1154,26 @@ impl Panel {
             egui::ComboBox::from_id_source("saved_boats").selected_text("Charger un bateau sauvegardé…").show_ui(ui,|ui|{for(name,c)in &self.saved{if ui.selectable_label(false,name).clicked(){action=Some(Action::Load(c.clone()));}}});
             ui.separator();ui.label("Essai reproductible — tunnel de vent");
             egui::CollapsingHeader::new("Conteneurs : stabilité et hypothèses").show(ui,|ui| {
-                ui.label("10 étages maximum pour les nouveaux bateaux ; dérogation pour un bateau rechargé sans modification de géométrie. Modèle sans arrimage ni mouvements du navire.");
+                ui.label("Limite d’étages réglable ; dérogation conservée pour les bateaux rechargés sans modification de géométrie.");
                 ui.add_enabled_ui(self.recorder.is_none(), |ui| {
+                    ui.add(egui::DragValue::new(&mut self.safety.max_tiers).clamp_range(1..=100).prefix("Nombre maximal d’étages : "));
+                    ui.checkbox(&mut self.safety.wind_estimate_enabled, "Éliminer au début du glissement ou de la perte d’équilibre d’une pile");
+                    ui.add(egui::DragValue::new(&mut self.safety.friction).clamp_range(0.001..=2.0).prefix("Frottement statique μ (hypothèse) : "));
+                    ui.add(egui::DragValue::new(&mut self.safety.wind_kmh).clamp_range(0.0..=1000.0).prefix("Vent à l’entrée (km/h) : "));
+                    ui.add(egui::DragValue::new(&mut self.safety.drag_coefficient).clamp_range(0.01..=5.0).prefix("Coefficient de traînée supposé : "));
+                    ui.add(egui::DragValue::new(&mut self.safety.span_m).clamp_range(0.1..=30.0).prefix("Largeur perpendiculaire au vent (m) : "));
                     ui.add(egui::DragValue::new(&mut self.safety.mass_kg).clamp_range(1.0..=100000.0).prefix("Masse par conteneur (kg) : "));
                     ui.add(egui::DragValue::new(&mut self.safety.base_m).clamp_range(0.1..=30.0).prefix("Base dans le sens du vent (m) : "));
                     ui.add(egui::DragValue::new(&mut self.safety.height_m).clamp_range(0.1..=10.0).prefix("Hauteur (m) : "));
                     ui.add(egui::DragValue::new(&mut self.safety.newtons_per_unit).clamp_range(0.0..=1e12).prefix("Calibration N/unité (0 = inconnue) : "));
                 });
                 ui.small("15 t est une hypothèse de chargement, pas une masse moyenne mesurée. Base 6,058 m : vent longitudinal sur un 20 pieds.");
-                ui.label(format!("Seuil théorique, force horizontale à mi-hauteur : {:.0} N",self.safety.centre_force_limit()));
-                if self.safety.newtons_per_unit==0.0 {ui.colored_label(egui::Color32::YELLOW,"Basculement non évalué : forces numériques non calibrées.");}
+                ui.label(format!("Perte d’équilibre, conteneur seul, force à mi-hauteur : {:.0} N",self.safety.centre_force_limit()));
+                ui.label(format!("Force estimée à {:.0} km/h : {:.0} N",self.safety.wind_kmh,self.safety.wind_force(self.safety.wind_kmh/3.6)));
+                ui.label(format!("Début de glissement, conteneur seul : {:.0} N",self.safety.friction*self.safety.mass_kg*9.81));
+                ui.small("Vent local estimé : F = ½ ρ Cd S v². À chaque interface de pile alignée et jointive : somme des forces ≤ μ Mg, somme des moments ≤ Mg B/2. Tolérance géométrique : une cellule.");
+                ui.small("Masses centrées et forces supposées de même sens ; sans arrimage ni roulis. μ = 0,3 et Cd = 1,2 sont des hypothèses, à adapter. Le seuil détecte un début d’instabilité, pas une distance de glissement ni un angle.");
+                ui.small("Entrée numérique nulle : estimation du vent non évaluée. La calibration N/unité concerne seulement le contrôle supplémentaire des forces du solveur.");
             });
             ui.add(egui::DragValue::new(&mut self.warmup).clamp_range(0..=1_000_000).prefix("Stabilisation : ").suffix(" pas"));
             ui.add(egui::DragValue::new(&mut self.measure).clamp_range(2..=1_000_000).prefix("Mesure : ").suffix(" pas"));
@@ -1164,7 +1229,7 @@ impl Panel {
                         ui.label(n.to_string());
                         ui.label(format!("{:.5}",drag.mean)).on_hover_text(format!("Écart type : {:.5}",drag.sd()));
                         ui.label(p.to_string());
-                        ui.label(if e.config.safety.newtons_per_unit>0.0 && e.stats.contains_key("container_load_mean_abs") {"Vérifiée (modèle)"}else{"Non évaluée"});
+                        ui.label(if e.config.safety.newtons_per_unit>0.0 && e.stats.contains_key("container_load_mean_abs") {"Forces calibrées"}else if e.stats.contains_key("wind_sliding_ratio") {"Estimation vent"}else{"Non évaluée"});
                         ui.push_id(rank, |ui| { ui.horizontal(|ui| {
                             if ui.button("Charger").clicked() { action=Some(Action::Load(e.config.clone())); }
                             if ui.button("Copier").clicked() {

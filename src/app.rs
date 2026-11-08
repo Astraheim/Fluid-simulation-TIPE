@@ -226,7 +226,7 @@ struct BoatUiState {
 }
 
 impl BoatUiState {
-    fn randomize(&mut self, rng: &mut impl rand::Rng) -> Result<(), &'static str> {
+    fn randomize(&mut self, rng: &mut impl rand::Rng, max_tiers: usize) -> Result<(), &'static str> {
         // Choisir parmi les chargements admissibles, sans boucle de rejet.
         // Les dimensions manuelles ne sont jamais réduites pour atteindre 50.
         let space = N*0.5-self.hull_height*0.5-3.0;
@@ -235,7 +235,7 @@ impl BoatUiState {
         for kind in 0..4 {
             let stack_space = if kind==3 {space-3.0*support_height} else {space};
             let mut layouts = Vec::new();
-            for rows in 1..=crate::cargo_safety::MAX_TIERS {
+            for rows in 1..=max_tiers {
                 if rows as f32*self.container_height>stack_space {continue;}
                 for cols in 1..=25usize {
                     if kind==1 && cols!=rows {continue;}
@@ -962,7 +962,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                                 ui.selectable_value(&mut boat_ui.kind_index, 2, "Quinconce");
                                                 ui.selectable_value(&mut boat_ui.kind_index, 3, "Étagé avec supports");
                                             });
-                                        ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=crate::cargo_safety::MAX_TIERS).text("Rangées"));
+                                        ui.add(egui::Slider::new(&mut boat_ui.rows, 1..=experiments.safety.max_tiers).text("Rangées"));
                                         if boat_ui.kind_index == 3 { ui.add(egui::Slider::new(&mut boat_ui.support_height, 1.0..=20.0).text("Hauteur des gradins")); }
                                         if boat_ui.kind_index != 1 {
                                             ui.add(egui::Slider::new(&mut boat_ui.cols, 1..=25).text("Colonnes"));
@@ -1170,7 +1170,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     }
                     let previous_boat_ui = boat_ui.clone();
                     if apply_random_boat {
-                        match boat_ui.randomize(&mut rand::rng()) {
+                        match boat_ui.randomize(&mut rand::rng(), experiments.safety.max_tiers) {
                             Ok(()) => apply_boat=true,
                             Err(message) => {
                                 experiments.status=message.into();apply_random_boat=false;apply_boat=false;
@@ -1203,10 +1203,10 @@ pub fn run_app(mut grid: Grid) -> ! {
                         setup_config(&mut next_grid,ConfigKind::ClassicFlow,&tunnel_hole_positions(),next_waterline.y_center);
                         let count=visible_container_count(&next_grid,&next_labels);
                         let mut candidate=crate::experiments::Config::capture(&next_grid,&next_labels);
-                        candidate.speed=params.flow_velocity;candidate.hull_size=Some((width,height));
+                        candidate.safety=experiments.safety.clone();candidate.speed=params.flow_velocity;candidate.hull_size=Some((width,height));
                         let filtered=matches!(experiment_action,Some(crate::experiments::Action::RandomStart)) && !experiments.candidate_can_win(&candidate);
                         if apply_random_boat && (count<50 || filtered) && attempt<63 {
-                            if boat_ui.randomize(&mut rand::rng()).is_ok() { continue; }
+                            if boat_ui.randomize(&mut rand::rng(), experiments.safety.max_tiers).is_ok() { continue; }
                         }
                         if filtered {
                             boat_ui=previous_boat_ui.clone();
@@ -1489,7 +1489,7 @@ mod random_boat_tests {
         let initial_freeboard=boat.side_profile.freeboard_ratio;
         let mut kinds=std::collections::HashSet::new();let mut profiles=std::collections::HashSet::new();
         for _ in 0..128 {
-            boat.randomize(&mut rng).unwrap();
+            boat.randomize(&mut rng, crate::cargo_safety::MAX_TIERS).unwrap();
             assert_eq!((boat.hull_width,boat.hull_height),(180.0,40.0));assert!(!boat.biblio);
             assert_eq!((boat.container_width,boat.container_height),(13.5,9.5));
             assert!(boat.curve_bow && boat.curve_stern);
@@ -1513,7 +1513,7 @@ mod random_boat_tests {
         for size in [5.0,N*0.9] {
             boat.hull_width=size;boat.hull_height=size;
             let before=serde_json::to_string(&boat).unwrap();
-            assert!(boat.randomize(&mut rng).is_err());
+            assert!(boat.randomize(&mut rng, crate::cargo_safety::MAX_TIERS).is_err());
             assert_eq!(serde_json::to_string(&boat).unwrap(),before);
         }
     }
