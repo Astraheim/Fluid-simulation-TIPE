@@ -36,3 +36,27 @@ use super::*;
  assert_eq!(g.divergence_after_projection,g.divergence_end_step);
 }
 }
+
+// Same workload for baseline and optimized solver. No rendering, force recording
+// or geometry generation is included in the timed numerical step.
+#[cfg(test)] mod speed_benchmark {
+    use super::*;
+    #[test]
+    #[ignore = "manual release-mode benchmark"]
+    fn benchmark_boat_steps() {
+        for boat in [0,5] {
+            let c=experiments::default_campaign().boats.remove(boat);
+            for repeat in 0..3 {
+                let (mut g,_)=c.grid().unwrap();
+                for step in 0..3 {
+                    experiments::inject(&mut g,c.density,1.0);
+                    let t=std::time::Instant::now();
+                    g.vel2_step(1.0);
+                    println!("BENCH,{boat},{repeat},{step},{:.6},{},{:.9},{:.9},{}",
+                        t.elapsed().as_secs_f64()*1000.0,g.projection_iterations,
+                        g.divergence_before_projection,g.divergence_after_projection,g.projection_converged);
+                }
+            }
+        }
+    }
+}
