@@ -19,6 +19,9 @@ pub struct Band {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// Dérogation de hauteur pour une géométrie rechargée sans modification.
+    #[serde(default)]
+    pub saved_height_exemption: bool,
     #[serde(default)]
     pub safety: crate::cargo_safety::Safety,
     pub version: u32,
@@ -69,6 +72,7 @@ impl Config {
             }
         }
         Self {
+            saved_height_exemption: false,
             safety: crate::cargo_safety::Safety::default(),
             version: 1,
             source: source_id(),
@@ -360,7 +364,8 @@ pub fn entries(root: &Path) -> Result<Vec<Entry>> {
             if e.status == "completed"
                 && e.samples >= 2
                 && e.stats.contains_key("Fx")
-                && crate::cargo_safety::tiers(&e.config) <= crate::cargo_safety::MAX_TIERS
+                && (e.config.saved_height_exemption
+                    || crate::cargo_safety::tiers(&e.config) <= crate::cargo_safety::MAX_TIERS)
             {
                 out.push(e);
             }
@@ -390,7 +395,9 @@ pub struct Recorder {
 impl Recorder {
     pub fn new(config: Config, root: &Path) -> Result<Self> {
         config.validate()?;
-        if crate::cargo_safety::tiers(&config) > crate::cargo_safety::MAX_TIERS {
+        if !config.saved_height_exemption
+            && crate::cargo_safety::tiers(&config) > crate::cargo_safety::MAX_TIERS
+        {
             return Err("Bateau invalide : plus de 10 étages de conteneurs".into());
         }
         fs::create_dir_all(root)?;
@@ -453,7 +460,7 @@ impl Recorder {
             "stats": e.stats,
             "source": e.source,
         });
-        document["cargo_assessment"] = serde_json::json!({"max_tiers":crate::cargo_safety::tiers(&self.config),"tier_limit":crate::cargo_safety::MAX_TIERS,"access_proxy":crate::cargo_safety::access(&self.config),"peak_overturning_or_lift_ratio":self.peak_safety_ratio,"force_check":if self.peak_safety_ratio.is_some(){"calibrated_exploratory_model"}else{"not_evaluated_uncalibrated"},"assumptions":"individual unlashed boxes; no ship motions, sliding, support or stack-load validation"});
+        document["cargo_assessment"] = serde_json::json!({"max_tiers":crate::cargo_safety::tiers(&self.config),"tier_limit":crate::cargo_safety::MAX_TIERS,"height_limit_waived":self.config.saved_height_exemption,"access_proxy":crate::cargo_safety::access(&self.config),"peak_overturning_or_lift_ratio":self.peak_safety_ratio,"force_check":if self.peak_safety_ratio.is_some(){"calibrated_exploratory_model"}else{"not_evaluated_uncalibrated"},"assumptions":"individual unlashed boxes; no ship motions, sliding, support or stack-load validation"});
         document["manifest"] = serde_json::json!(self.manifest);
         document["score"] = serde_json::json!({
             "weights":Weights::default(),
@@ -720,6 +727,48 @@ pub fn cli() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_tall_boat_can_be_measured_and_ranked() {
+        let mut c = Config::capture(&Grid::new(), &HashMap::new());
+        c.bands.clear();
+        for id in 0..11 {
+            c.bands.push(Band {
+                x: 30,
+                first: 30 + 2 * id,
+                last: 30 + 2 * id,
+                kind: Some(WallKind::Container(id)),
+            });
+        }
+        c.speed = 0.0;
+        c.warmup = 0;
+        c.measure = 2;
+        let root = std::env::temp_dir().join(format!(
+            "tipe-height-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(Recorder::new(c.clone(), &root).is_err());
+        let saved = Config::parse(&c.text().unwrap()).unwrap();
+        let (g, labels) = saved.grid().unwrap();
+        let mut restored = Config::capture(&g, &labels);
+        let mut panel = Panel::default();
+        panel.loaded_bands = Some(saved.bands.clone());
+        restored.saved_height_exemption = panel.loaded_bands.as_ref() == Some(&restored.bands);
+        restored.speed = 0.0;
+        restored.warmup = 0;
+        restored.measure = 2;
+        assert!(restored.saved_height_exemption);
+        run(restored.clone(), &root).unwrap();
+        assert_eq!(entries(&root).unwrap().len(), 1);
+        restored.bands.pop();
+        restored.saved_height_exemption = panel.loaded_bands.as_ref() == Some(&restored.bands);
+        assert!(!restored.saved_height_exemption);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn stats_known() {
         let mut s = Stats::default();
@@ -765,7 +814,9 @@ mod tests {
         let a = run(c.clone(), &root).unwrap();
         let b = run(c.clone(), &root).unwrap();
         assert_eq!(a.samples, 2);
-        let compact: serde_json::Value = serde_json::from_slice(&fs::read(Path::new(&a.folder).join("summary.json")).unwrap()).unwrap();
+        let compact: serde_json::Value =
+            serde_json::from_slice(&fs::read(Path::new(&a.folder).join("summary.json")).unwrap())
+                .unwrap();
         assert!(compact.get("config").is_none());
         assert!(compact.get("folder").is_none());
         assert_eq!(fs::read_dir(root.join("manifests")).unwrap().count(), 1);
@@ -951,6 +1002,7 @@ pub enum Action {
     Load(Config),
 }
 pub struct Panel {
+    pub loaded_bands: Option<Vec<Band>>,
     pub text: String,
     pub code_expanded: bool,
     pub rankings_open: bool,
@@ -969,6 +1021,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         let mut p = Self {
+            loaded_bands: None,
             text: String::new(),
             code_expanded: false,
             rankings_open: false,
@@ -1046,7 +1099,7 @@ impl Panel {
             egui::ComboBox::from_id_source("saved_boats").selected_text("Charger un bateau sauvegardé…").show_ui(ui,|ui|{for(name,c)in &self.saved{if ui.selectable_label(false,name).clicked(){action=Some(Action::Load(c.clone()));}}});
             ui.separator();ui.label("Essai reproductible — tunnel de vent");
             egui::CollapsingHeader::new("Conteneurs : stabilité et hypothèses").show(ui,|ui| {
-                ui.label("10 étages maximum. Modèle individuel sans arrimage, glissement ni mouvements du navire.");
+                ui.label("10 étages maximum pour les nouveaux bateaux ; dérogation pour un bateau rechargé sans modification de géométrie. Modèle sans arrimage ni mouvements du navire.");
                 ui.add_enabled_ui(self.recorder.is_none(), |ui| {
                     ui.add(egui::DragValue::new(&mut self.safety.mass_kg).clamp_range(1.0..=100000.0).prefix("Masse par conteneur (kg) : "));
                     ui.add(egui::DragValue::new(&mut self.safety.base_m).clamp_range(0.1..=30.0).prefix("Base dans le sens du vent (m) : "));
