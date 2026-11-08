@@ -260,7 +260,7 @@ impl Stats {
         }
     }
 }
-const METRICS: [&str; 14] = [
+const METRICS: [&str; 19] = [
     "Fx",
     "Fy",
     "torque",
@@ -275,6 +275,11 @@ const METRICS: [&str; 14] = [
     "net_outward_flow",
     "step_ms",
     "divergence_max_abs",
+    "divergence_before_projection",
+    "divergence_after_projection",
+    "divergence_end_step",
+    "projection_converged",
+    "projection_incompatible_divergence",
 ];
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -388,6 +393,7 @@ pub struct Recorder {
     pub step: usize,
     stats: BTreeMap<String, Stats>,
     done: bool,
+    unconverged_samples: usize,
     manifest: String,
     cargo_bounds: BTreeMap<usize, crate::cargo_safety::Bounds>,
     peak_safety_ratio: Option<f64>,
@@ -450,6 +456,7 @@ impl Recorder {
             step: 0,
             stats: BTreeMap::new(),
             done: false,
+            unconverged_samples: 0,
             manifest,
         };
         r.summary("running")?;
@@ -482,6 +489,7 @@ impl Recorder {
             "peak_sliding_ratio":self.peak_sliding_ratio,
             "evaluated":self.peak_rocking_ratio.is_some()
         });
+        document["unconverged_projection_samples"] = serde_json::json!(self.unconverged_samples);
         document["manifest"] = serde_json::json!(self.manifest);
         document["score"] = serde_json::json!({
             "weights":Weights::default(),
@@ -516,6 +524,11 @@ impl Recorder {
         Ok(e)
     }
     pub fn finish(&mut self, status: &str) -> Result<Entry> {
+        let status = if status == "completed" && self.unconverged_samples > 0 {
+            "non_converged_projection"
+        } else {
+            status
+        };
         let e = self.summary(status)?;
         self.done = true;
         Ok(e)
@@ -635,6 +648,11 @@ impl Recorder {
             qo - qi + qb - qt,
             ms,
             dmax,
+            g.divergence_before_projection,
+            g.divergence_after_projection,
+            g.divergence_end_step,
+            if g.projection_converged { 1.0 } else { 0.0 },
+            g.projection_incompatible_divergence,
         ];
         if !values.iter().all(|v| v.is_finite()) {
             self.finish("non_finite")?;
@@ -642,6 +660,9 @@ impl Recorder {
         }
         self.step += 1;
         let measure = self.step > self.config.warmup;
+        if measure && !g.projection_converged {
+            self.unconverged_samples += 1;
+        }
         if measure {
             self.stats
                 .entry("container_load_mean_abs".into())
@@ -824,6 +845,30 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn unconverged_measurements_are_saved_but_not_ranked() {
+        let mut c = Config::capture(&Grid::new(), &HashMap::new());
+        c.speed = 0.0;
+        c.warmup = 0;
+        c.measure = 2;
+        let (mut g, labels) = c.grid().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "tipe-nonconverged-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut r = Recorder::new(c, &root).unwrap();
+        assert!(!r.sample(&mut g, &labels, 0.0).unwrap());
+        assert!(r.sample(&mut g, &labels, 0.0).unwrap());
+        assert_eq!(
+            r.finish("completed").unwrap().status,
+            "non_converged_projection"
+        );
+        assert!(entries(&root).unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn stats_known() {
         let mut s = Stats::default();
@@ -1043,7 +1088,8 @@ mod tests {
         let mut g = Grid::new();
         g.project();
         assert_eq!(g.projection_residual, 0.0);
-        assert_eq!(g.projection_iterations, 1);
+        assert_eq!(g.projection_iterations, 0);
+        assert!(g.projection_converged);
     }
 }
 

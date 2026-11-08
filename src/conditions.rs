@@ -195,3 +195,8 @@ pub fn wind_profile_factor(j: usize) -> f32 {
 
     f.clamp(0.0, WIND_MAX_FACTOR)
 }
+
+// Experimental residual-driven pressure projection, not a physical validation.
+pub const PROJECTION_MAX_ITERATIONS: usize = 2000;
+pub const PROJECTION_ABS_DIVERGENCE_TOLERANCE: f64 = 1e-3;
+pub const PROJECTION_RELATIVE_TOLERANCE: f64 = 1e-4;
