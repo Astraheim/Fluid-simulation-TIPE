@@ -1231,6 +1231,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     let capture = |grid: &Grid, labels: &HashMap<usize,WallKind>, params: &SimParams,
                                    boat: &BoatUiState, scenario: &ScenarioUiState, panel: &crate::experiments::Panel, waterline: f32, hull_size: Option<(f32,f32)>| {
                         let mut c = crate::experiments::Config::capture(grid,labels);
+                        c.saved_height_exemption=panel.loaded_bands.as_ref()==Some(&c.bands);
                         c.safety=panel.safety.clone(); c.hull_size=hull_size; c.name=panel.name.clone(); c.speed=params.flow_velocity; c.density=params.flow_density;
                         c.wind_height=params.wind_min_height; c.realistic_wind=params.realistic_wind;
                         c.waterline=waterline; c.warmup=panel.warmup; c.measure=panel.measure;
@@ -1266,6 +1267,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         serde_json::from_value::<ScenarioUiState>(c.ui["scenario"].clone())?))};
                                     if let Some(mut r)=experiments.recorder.take(){r.finish("interrupted")?;}
                                     if let Some((p,b,s))=saved_ui {params=p;boat_ui=b;scenario=s;}
+                                    experiments.loaded_bands=Some(c.bands.clone());
                                     active_hull_size=Some(c.hull_dimensions());
                                     grid=g;boat_labels=l;params.flow_velocity=c.speed;params.flow_density=c.density;
                                     params.wind_min_height=c.wind_height;params.realistic_wind=c.realistic_wind;params.paused=true;
