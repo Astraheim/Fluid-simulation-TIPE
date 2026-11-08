@@ -1182,6 +1182,11 @@ pub fn run_app(mut grid: Grid) -> ! {
                     if matches!(experiment_action,Some(crate::experiments::Action::RandomStart)) { experiments.refresh(); }
                     for attempt in 0..64 {
                         if !apply_boat { break; }
+                        // Tous les candidats d'un essai aléatoire ont les deux carénages.
+                        if matches!(experiment_action, Some(crate::experiments::Action::RandomStart)) {
+                            boat_ui.add_bow_fairing = true;
+                            boat_ui.add_stern_fairing = true;
+                        }
                         let boat_params = boat_params_from_ui(&boat_ui);
                         let (layout, profile) = if boat_ui.biblio {
                             build_biblio_layout()
