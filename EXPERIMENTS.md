@@ -21,9 +21,11 @@ Le meilleur score est le plus grand :
 - Références initiales : 65 conteneurs, une traînée numérique de 1, 1 000 cellules d'aménagement. Poids initiaux égaux à 1. Ce sont des choix de normalisation modifiables, pas un optimum économique démontré.
 - Le couple et les autres mesures restent disponibles indépendamment du score.
 
-Les classements sont séparés par corps central de coque, obstacles fixes, vitesse, densité injectée, hauteur/profil du vent, ligne d'eau, grille, pas de temps, fenêtre de mesure et version du programme. Les dimensions des conteneurs sont aussi prises en compte lorsqu'elles proviennent des curseurs. Pour une campagne écrite à la main, conserver la même dimension de conteneurs ; récompenser artificiellement de très petits conteneurs n'aurait aucun sens.
+Les classements sont séparés **uniquement par vitesse d'entrée et dimensions du corps central (longueur × hauteur dans cette vue 2D)**. Proue, poupe, protections, chargement, ligne d'eau, durée, autres réglages et versions du programme/dépendances ne créent pas de groupes supplémentaires. Les anciens résultats de l'interface sont regroupés automatiquement à la lecture, sans les modifier. Les dimensions appliquées sont enregistrées explicitement ; pour les anciens fichiers on utilise les dimensions des curseurs (ou celles du modèle biblio). Si un ancien fichier ne contient ni dimensions ni curseurs, seule l'enveloppe des cellules de coque est disponible pour déterminer sa taille.
 
-Un essai « completed » a terminé sa fenêtre, **cela ne prouve ni convergence ni validité physique**. Le résidu est affiché à côté des résultats. Vérifier les historiques, prolonger la stabilisation et comparer plusieurs fenêtres avant d'interpréter un classement. L'écart type décrit la fluctuation des mesures ; il n'est pas l'incertitude sur la moyenne de données corrélées.
+Le bouton **Classements** ouvre une fenêtre séparée : sélectionner un groupe nommé « Coque longueur × hauteur · vitesse », puis utiliser **Charger** ou **Copier** dans le tableau. Les poids sont réglables dans cette fenêtre. Les autres conditions restent enregistrées pour interpréter les résultats, mais ne bloquent plus les comparaisons.
+
+Un essai « completed » a terminé sa fenêtre, **cela ne prouve ni convergence ni validité physique**. Le résidu est conservé dans la synthèse des résultats. Vérifier les historiques, prolonger la stabilisation et comparer plusieurs fenêtres avant d'interpréter un classement. L'écart type décrit la fluctuation des mesures ; il n'est pas l'incertitude sur la moyenne de données corrélées.
 
 ## Fichiers d'un essai
 
@@ -32,7 +34,7 @@ Chaque essai crée un dossier unique `results/run_…/` sans écraser les préc�
 | Fichier | Contenu |
 |---|---|
 | `config.json` | Réglages et géométrie exacte rechargeable, version du format, grille, pas de temps et origine du code |
-| `manifest.json` | Empreinte des sources, compilateur/cible, constantes de `conditions.rs`, dépendances et conventions |
+| `../manifests/build_….json` (partagé) | Une seule copie des sources techniques, dépendances et conventions par contenu distinct |
 | `summary.json` | Synthèse unique : moyennes, écarts types, statut, nombre de pas, temps, quantités de murs, configuration et score avec sa formule et ses poids |
 
 Les statistiques comprennent : Fx, Fy, couple, traînée des conteneurs, maximum absolu du potentiel de pression, vitesse maximale au centre des cellules, résidu absolu/relatif du Poisson, itérations, débits gauche/droite, flux sortant net sur les quatre côtés, durée du pas (injection + simulation, sans rendu ni écriture), divergence finale maximale, Cx/Cy indicatifs, conteneurs et quantités de cellules solides.
@@ -43,11 +45,11 @@ La géométrie et les étiquettes évitent de compter la boîte d'injection ou l
 
 Fermer normalement pendant un essai écrit la synthèse des mesures accumulées avec le statut `interrupted`. Un arrêt brutal peut laisser seulement la synthèse initiale `running` : les mesures en mémoire sont alors perdues et l’essai n’est pas classé. Il n’y a plus d’écriture de fichier à chaque pas. Une valeur non finie exclut également l'essai. Les fichiers sont locaux au dossier de lancement, pas synchronisés automatiquement par Git. Les anciens essais restent lisibles ; leurs anciens fichiers ne sont pas supprimés.
 
-Le score aux poids par défaut se trouve dans `summary.json`, sous `score`. Le classement global `ranking.json` conserve les poids choisis dans le menu. Il reste donc trois fichiers par nouvel essai : `config.json`, `manifest.json` et `summary.json`.
+Le score aux poids par défaut se trouve dans `summary.json`, sous `score`. Le classement global `ranking.json` conserve les poids choisis dans le menu. Il reste **deux fichiers par nouvel essai** : `config.json` et `summary.json`. Le champ `manifest` de la synthèse pointe vers le fichier technique partagé (chemin relatif au dossier de l’essai). Pour déplacer les résultats avec leur provenance, copier le dossier `results` entier.
 
 ### À quoi sert le manifest ?
 
-`config.json` décrit le bateau et les réglages. `manifest.json` décrit le **programme qui a réalisé le calcul** : empreinte des sources, compilateur et architecture, constantes non réglables dans le menu, versions des dépendances, modèle de forces, unités/conventions et état initial. Il permet de comprendre pourquoi un même bateau pourrait donner un résultat différent après une modification du code. Il est écrit une seule fois au démarrage de l’essai et n’est pas nécessaire pour charger un bateau dans le menu.
+`config.json` décrit le bateau et les réglages. `manifest.json` décrit le **programme qui a réalisé le calcul** : empreinte des sources, compilateur et architecture, constantes non réglables dans le menu, versions des dépendances, modèle de forces, unités/conventions et état initial. Il permet de comprendre pourquoi un même bateau pourrait donner un résultat différent après une modification du code. Il est désormais enregistré dans `results/manifests/` une seule fois par contenu technique distinct et réutilisé par tous les essais concernés. Il ne participe jamais à la clé de classement. Une mise à jour de dépendances peut donc créer une nouvelle fiche technique, mais **pas un nouveau classement**. Les anciens fichiers `manifest.json` sont laissés intacts. Cette fiche n’est pas nécessaire pour charger un bateau dans le menu.
 
 ## Campagne sans interface
 
@@ -80,3 +82,12 @@ Dans **Bateaux sauvegardés / classement**, le bouton **Tester et classer un bat
 ### Chargement minimum des bateaux aléatoires
 
 Les deux boutons aléatoires imposent au moins **50 conteneurs**. Le nombre est calculé selon la disposition (grille, pyramide, quinconce ou étagée), avec un espacement adapté à la place disponible et des dimensions de conteneurs conservées. Seules les dispositions permettant ce chargement sont tirées. Si aucune ne convient, un message explique l’impossibilité et le bateau courant reste inchangé ; aucun essai aléatoire ne démarre.
+
+
+## Présélection des essais aléatoires
+
+Le bouton **Tester et classer un bateau aléatoire** conserve le minimum de 50 conteneurs et cherche jusqu’à 64 géométries avant de lancer le solveur. Dans le groupe correspondant aux dimensions et à la vitesse courantes, il compare le meilleur score mesuré au score maximal possible du candidat :
+
+`score maximal possible = poids_capacité × N/Nref − poids_protections × P/Pref`
+
+La pénalité de traînée est au mieux nulle. Si ce majorant ne dépasse pas le meilleur score enregistré, le candidat est éliminé sans simulation. Sinon, son aérodynamique doit encore être mesurée. Ce filtre utilise les poids actuels et les quantités réellement présentes dans la grille ; il ne prouve pas le réalisme physique et ne suppose pas qu’une protection importante soit forcément inutile. Sans résultat de référence dans le groupe, un candidat ayant au moins 50 conteneurs peut être testé. Si aucun des 64 candidats ne passe, aucun essai n’est lancé et le bateau précédent est conservé. Le bouton de génération simple et les essais manuels restent disponibles sans ce filtre de score.

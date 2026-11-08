@@ -726,6 +726,7 @@ pub fn run_app(mut grid: Grid) -> ! {
     let mut boat_ui = BoatUiState::default();
     let mut boat_visuals = BoatVisualUiState::default();
     let mut boat_labels: HashMap<usize, WallKind> = HashMap::new();
+    let mut active_hull_size: Option<(f32, f32)> = None;
     let mut scenario = ScenarioUiState::default();
     let mut step: usize = 0;
     let start = Instant::now();
@@ -1116,7 +1117,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                         active_waterline = boat_waterline_overlay(&boat_ui);
                         let hole_pos = tunnel_hole_positions();
                         grid = Grid::new();
-                        boat_labels.clear();
+                        boat_labels.clear();active_hull_size=None;
                         apply_shape(&mut grid, scenario.shape, scenario.shape_size, scenario.shape_x);
                         setup_config(&mut grid, scenario.config, &hole_pos, active_waterline.y_center);
                         history.clear();
@@ -1174,14 +1175,16 @@ pub fn run_app(mut grid: Grid) -> ! {
                         }
                     }
 
-                    if apply_boat {
+                    if matches!(experiment_action,Some(crate::experiments::Action::RandomStart)) { experiments.refresh(); }
+                    for attempt in 0..64 {
+                        if !apply_boat { break; }
                         let boat_params = boat_params_from_ui(&boat_ui);
                         let (layout, profile) = if boat_ui.biblio {
                             build_biblio_layout()
                         } else {
                             (build_boat_layout("custom", &boat_params), boat_ui.side_profile)
                         };
-                        let (center, _, height) = layout.hull_rects[0];
+                        let (center, width, height) = layout.hull_rects[0];
                         let next_waterline = WaterlineOverlay {
                             y_center: center.1 as f32 - height / 2.0 + height * profile.freeboard_ratio,
                             thickness: profile.waterline_thickness,
@@ -1190,24 +1193,36 @@ pub fn run_app(mut grid: Grid) -> ! {
                         let next_labels=next_grid.apply_layout_with_profile(&layout,&profile);
                         setup_config(&mut next_grid,ConfigKind::ClassicFlow,&tunnel_hole_positions(),next_waterline.y_center);
                         let count=visible_container_count(&next_grid,&next_labels);
-                        if apply_random_boat && count<50 {
-                            boat_ui=previous_boat_ui;
+                        let mut candidate=crate::experiments::Config::capture(&next_grid,&next_labels);
+                        candidate.speed=params.flow_velocity;candidate.hull_size=Some((width,height));
+                        let filtered=matches!(experiment_action,Some(crate::experiments::Action::RandomStart)) && !experiments.candidate_can_win(&candidate);
+                        if apply_random_boat && (count<50 || filtered) && attempt<63 {
+                            if boat_ui.randomize(&mut rand::rng()).is_ok() { continue; }
+                        }
+                        if filtered {
+                            boat_ui=previous_boat_ui.clone();
+                            experiments.status="Aucun candidat prometteur parmi 64 tirages : essai non lancé, bateau conservé. Modifie les poids ou les réglages, ou utilise un essai manuel.".into();
+                            apply_boat=false;apply_random_boat=false;experiment_action=None;
+                        } else if apply_random_boat && count<50 {
+                            boat_ui=previous_boat_ui.clone();
                             experiments.status=format!("Le tirage ne laisse que {count} conteneurs visibles : bateau précédent conservé. Réessaie ou ajuste les dimensions.");
                             apply_boat=false;apply_random_boat=false;
                             if matches!(experiment_action,Some(crate::experiments::Action::RandomStart)) {experiment_action=None;}
                         } else {
+                            active_hull_size=Some((width,height));
                             active_waterline=next_waterline;grid=next_grid;boat_labels=next_labels;
                             if !apply_random_boat {params.wind_min_height=260.0_f32.min(N);}
                             scenario.config=ConfigKind::ClassicFlow;
                             history.clear();step=0;
                         }
+                        break;
                     }
 
                     // Capturer les murs réellement appliqués, pas seulement les curseurs du générateur.
                     let capture = |grid: &Grid, labels: &HashMap<usize,WallKind>, params: &SimParams,
-                                   boat: &BoatUiState, scenario: &ScenarioUiState, panel: &crate::experiments::Panel, waterline: f32| {
+                                   boat: &BoatUiState, scenario: &ScenarioUiState, panel: &crate::experiments::Panel, waterline: f32, hull_size: Option<(f32,f32)>| {
                         let mut c = crate::experiments::Config::capture(grid,labels);
-                        c.name=panel.name.clone(); c.speed=params.flow_velocity; c.density=params.flow_density;
+                        c.hull_size=hull_size; c.name=panel.name.clone(); c.speed=params.flow_velocity; c.density=params.flow_density;
                         c.wind_height=params.wind_min_height; c.realistic_wind=params.realistic_wind;
                         c.waterline=waterline; c.warmup=panel.warmup; c.measure=panel.measure;
                         c.ui=serde_json::json!({"params":params,"boat":boat,"scenario":scenario}); c
@@ -1220,7 +1235,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                 Action::Stop => { if let Some(mut r)=experiments.recorder.take(){r.finish("interrupted")?;} experiments.status="Essai arrêté, données conservées hors classement".into(); },
                                 Action::Export | Action::Save | Action::Start | Action::RandomStart => {
                                     if scenario.config!=ConfigKind::ClassicFlow {return Err("Les sauvegardes d’essais concernent le tunnel de vent. Sélectionne ce mode.".into());}
-                                    let c=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center);c.validate()?;
+                                    let c=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center,active_hull_size);c.validate()?;
                                     match action {
                                         Action::Export => {experiments.text=c.text()?;experiments.code_expanded=false;full_output.platform_output.copied_text=experiments.text.clone();},
                                         Action::Save => experiments.save(&c)?,
@@ -1242,6 +1257,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                                         serde_json::from_value::<ScenarioUiState>(c.ui["scenario"].clone())?))};
                                     if let Some(mut r)=experiments.recorder.take(){r.finish("interrupted")?;}
                                     if let Some((p,b,s))=saved_ui {params=p;boat_ui=b;scenario=s;}
+                                    active_hull_size=Some(c.hull_dimensions());
                                     grid=g;boat_labels=l;params.flow_velocity=c.speed;params.flow_density=c.density;
                                     params.wind_min_height=c.wind_height;params.realistic_wind=c.realistic_wind;params.paused=true;
                                     scenario.config=ConfigKind::ClassicFlow;active_waterline.y_center=c.waterline;
@@ -1254,7 +1270,7 @@ pub fn run_app(mut grid: Grid) -> ! {
                     }
                     // Un essai ne mélange jamais plusieurs géométries ou réglages.
                     if let Some(r)=&experiments.recorder {
-                        let now=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center);
+                        let now=capture(&grid,&boat_labels,&params,&boat_ui,&scenario,&experiments,active_waterline.y_center,active_hull_size);
                         if ((!started_this_frame) && (do_restart || apply_boat || apply_random_boat)) || scenario.config!=ConfigKind::ClassicFlow || now.bands!=r.config.bands || now.speed!=r.config.speed || now.density!=r.config.density || now.wind_height!=r.config.wind_height || now.realistic_wind!=r.config.realistic_wind || now.waterline!=r.config.waterline {
                             if let Some(mut r)=experiments.recorder.take(){experiments.status=match r.finish("interrupted"){Ok(_)=>"Réglages modifiés : essai interrompu, hors classement.".into(),Err(e)=>e.to_string()};}
                         }
@@ -1277,9 +1293,9 @@ pub fn run_app(mut grid: Grid) -> ! {
                             }
                         }
                         if completed {
-                            if let Some(r)=experiments.recorder.take(){experiments.protocol=format!("{}{}",crate::experiments::source_id(),r.config.protocol());}
+                            if let Some(r)=experiments.recorder.take(){experiments.protocol=r.config.protocol();}
                             params.paused=true; let previous=experiments.status.clone();experiments.refresh();
-                            let mut ranked:Vec<_>=experiments.entries.iter().filter(|e|format!("{}{}",e.source,e.config.protocol())==experiments.protocol).cloned().collect();
+                            let mut ranked:Vec<_>=experiments.entries.iter().filter(|e|e.config.protocol()==experiments.protocol).cloned().collect();
                             ranked.sort_by(|a,b|experiments.weights.score(b).total_cmp(&experiments.weights.score(a)));
                             experiments.status=match crate::experiments::save_ranking(std::path::Path::new(&experiments.root),&ranked,&experiments.weights){Ok(())=>format!("Essai terminé ou interrompu. {} résultats disponibles. {}",ranked.len(),previous),Err(e)=>e.to_string()};
                         }

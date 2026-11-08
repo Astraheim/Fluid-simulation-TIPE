@@ -35,6 +35,8 @@ pub struct Config {
     /// Géométrie discrétisée exacte, y compris les dessins manuels et tirages aléatoires.
     pub bands: Vec<Band>,
     pub ui: serde_json::Value,
+    #[serde(default)]
+    pub hull_size: Option<(f32, f32)>,
 }
 impl Config {
     pub fn capture(grid: &Grid, labels: &HashMap<usize, WallKind>) -> Self {
@@ -79,6 +81,7 @@ impl Config {
             measure: 600,
             bands,
             ui: serde_json::Value::Null,
+            hull_size: None,
         }
     }
     pub fn validate(&self) -> Result<()> {
@@ -96,6 +99,12 @@ impl Config {
             || self.warmup.checked_add(self.measure).is_none()
         {
             return Err("Paramètres invalides (au moins deux pas de mesure)".into());
+        }
+        if self
+            .hull_size
+            .is_some_and(|(w, h)| !w.is_finite() || !h.is_finite() || w < 0.0 || h < 0.0)
+        {
+            return Err("Dimensions de coque invalides".into());
         }
         let mut occupied = HashSet::new();
         for b in &self.bands {
@@ -166,41 +175,45 @@ impl Config {
         }
         (ids.len(), protection, ship, all)
     }
-    /// Comparaisons à coque, environnement et protocole identiques.
-    /// Les supports sont évalués avec les protections.
-    pub fn protocol(&self) -> String {
+    /// Dimensions nominales du corps central, sans proue/poupe ni position.
+    pub fn hull_dimensions(&self) -> (f32, f32) {
+        if let Some(size) = self.hull_size {
+            return size;
+        }
+        // Compatibilité avec les anciens fichiers de l'interface.
+        let boat = &self.ui["boat"];
+        if boat["biblio"].as_bool() == Some(true) {
+            let (layout, _) = crate::ship::build_biblio_layout();
+            let (_, w, h) = layout.hull_rects[0];
+            return (w, h);
+        }
+        if let (Some(w), Some(h)) = (boat["hull_width"].as_f64(), boat["hull_height"].as_f64()) {
+            return (w as f32, h as f32);
+        }
+        // Anciens fichiers sans curseurs : enveloppe des seules cellules Hull.
         let hull: Vec<_> = self
             .bands
             .iter()
-            .filter(|b| matches!(b.kind, None | Some(WallKind::Hull)))
+            .filter(|b| b.kind == Some(WallKind::Hull))
             .collect();
-        // La bande d'eau est interrompue par la proue/poupe : comparer ses
-        // niveaux, pas ses trous, qui changent avec les protections.
-        let water_rows: std::collections::BTreeSet<_> = self
-            .bands
-            .iter()
-            .filter(|b| b.kind == Some(WallKind::Water))
-            .flat_map(|b| b.first..=b.last)
-            .collect();
-        serde_json::to_string(&(
-            self.n,
-            self.dt,
-            self.speed,
-            self.density,
-            self.wind_height,
-            self.realistic_wind,
-            self.waterline,
-            self.warmup,
-            self.measure,
-            hull,
-            water_rows,
-            (
-                &self.ui["boat"]["container_width"],
-                &self.ui["boat"]["container_height"],
-            ),
-            include_str!("conditions.rs"),
-        ))
-        .unwrap()
+        if hull.is_empty() {
+            return (0.0, 0.0);
+        }
+        (
+            (hull.iter().map(|b| b.x).max().unwrap() - hull.iter().map(|b| b.x).min().unwrap() + 1)
+                as f32,
+            (hull.iter().map(|b| b.last).max().unwrap()
+                - hull.iter().map(|b| b.first).min().unwrap()
+                + 1) as f32,
+        )
+    }
+    /// Seuls la vitesse d'entrée et les dimensions centrales séparent les groupes.
+    pub fn protocol(&self) -> String {
+        serde_json::to_string(&(self.speed + 0.0, self.hull_dimensions())).unwrap()
+    }
+    pub fn protocol_label(&self) -> String {
+        let (w, h) = self.hull_dimensions();
+        format!("Coque {w} × {h} · vitesse {}", self.speed)
     }
 }
 
@@ -284,6 +297,12 @@ impl Default for Weights {
     }
 }
 impl Weights {
+    /// Majorant du score avant simulation : la pénalité de traînée vaut au mieux zéro.
+    pub fn optimistic_score(&self, config: &Config) -> f64 {
+        let (n, p, _, _) = config.counts();
+        self.capacity * n as f64 / self.capacity_ref.max(1.0)
+            - self.protection * p as f64 / self.protection_ref.max(1.0)
+    }
     pub fn score(&self, e: &Entry) -> f64 {
         let (n, p, _, _) = e.config.counts();
         self.capacity * n as f64 / self.capacity_ref.max(1.0)
@@ -327,6 +346,7 @@ pub struct Recorder {
     pub step: usize,
     stats: BTreeMap<String, Stats>,
     done: bool,
+    manifest: String,
 }
 impl Recorder {
     pub fn new(config: Config, root: &Path) -> Result<Self> {
@@ -336,18 +356,40 @@ impl Recorder {
         let folder = root.join(format!("run_{stamp}_{}", std::process::id()));
         fs::create_dir(&folder)?;
         fs::write(folder.join("config.json"), config.text()?)?;
-        fs::write(
-            folder.join("manifest.json"),
-            serde_json::to_vec_pretty(
-                &serde_json::json!({"source":source_id(),"conditions_rs":include_str!("conditions.rs"),"cargo_lock":include_str!("../Cargo.lock"),"force_model":"legacy pressure potential + empirical normal drag; not SI", "axes":"x right, y down; torque about domain centre, lever arm / N", "initial_state":"zero velocities/density, phase from waterline", "coefficient_reference":"rho=RHO_AIR; U=input slider; Lref=1 grid domain; Cx,Cy proxies only", "pressure_phase":"projection before advection; velocities after complete step", "counts":config.counts()}),
-            )?,
-        )?;
+        // Une seule copie par contenu technique, partagée par tous les essais.
+        let manifest_data = serde_json::to_vec_pretty(&serde_json::json!({
+            "source":source_id(), "conditions_rs":include_str!("conditions.rs"),
+            "cargo_lock":include_str!("../Cargo.lock"),
+            "force_model":"legacy pressure potential + empirical normal drag; not SI",
+            "axes":"x right, y down; torque about domain centre, lever arm / N",
+            "initial_state":"zero velocities/density, phase from waterline",
+            "coefficient_reference":"rho=RHO_AIR; U=input slider; Lref=1 grid domain; Cx,Cy proxies only",
+            "pressure_phase":"projection before advection; velocities after complete step"
+        }))?;
+        let hash = manifest_data.iter().fold(14695981039346656037u64, |h, b| {
+            (h ^ *b as u64).wrapping_mul(1099511628211)
+        });
+        let manifests = root.join("manifests");
+        fs::create_dir_all(&manifests)?;
+        let filename = format!("build_{hash:016x}.json");
+        let target = manifests.join(&filename);
+        match File::options().write(true).create_new(true).open(&target) {
+            Ok(mut file) => file.write_all(&manifest_data)?,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if fs::read(&target)? != manifest_data {
+                    return Err("Manifest partagé incompatible".into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let manifest = format!("../manifests/{filename}");
         let mut r = Self {
             config,
             folder,
             step: 0,
             stats: BTreeMap::new(),
             done: false,
+            manifest,
         };
         r.summary("running")?;
         Ok(r)
@@ -362,6 +404,7 @@ impl Recorder {
             source: source_id(),
         };
         let mut document = serde_json::to_value(&e)?;
+        document["manifest"] = serde_json::json!(self.manifest);
         document["score"] = serde_json::json!({
             "weights":Weights::default(),
             "value":if e.samples>0 {Some(Weights::default().score(&e))}else{None},
@@ -530,7 +573,7 @@ pub struct Campaign {
 }
 pub fn default_campaign() -> Campaign {
     let (layout, profile) = crate::ship::build_biblio_layout();
-    let (center, _, height) = layout.hull_rects[0];
+    let (center, width, height) = layout.hull_rects[0];
     let waterline = center.1 as f32 - height / 2.0 + height * profile.freeboard_ratio;
     let mut boats = Vec::new();
     for protected in [false, true] {
@@ -570,6 +613,7 @@ pub fn default_campaign() -> Campaign {
                     .collect::<Vec<_>>(),
             );
             let mut c = Config::capture(&grid, &labels);
+            c.hull_size = Some((width, height));
             c.name = format!("{}{}", name, if protected { " + protection" } else { "" });
             c.waterline = waterline;
             c.wind_height = 260.0;
@@ -652,13 +696,20 @@ mod tests {
         let a = run(c.clone(), &root).unwrap();
         let b = run(c.clone(), &root).unwrap();
         assert_eq!(a.samples, 2);
+        assert_eq!(fs::read_dir(root.join("manifests")).unwrap().count(), 1);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(Path::new(&a.folder).join("summary.json")).unwrap())
+                .unwrap();
+        assert!(Path::new(&a.folder)
+            .join(saved["manifest"].as_str().unwrap())
+            .is_file());
         let files: HashSet<_> = fs::read_dir(&a.folder)
             .unwrap()
             .map(|p| p.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(
             files,
-            ["config.json", "manifest.json", "summary.json"]
+            ["config.json", "summary.json"]
                 .into_iter()
                 .map(String::from)
                 .collect()
@@ -717,6 +768,80 @@ mod tests {
         assert_eq!(a.counts().1, ends);
     }
     #[test]
+    fn ranking_uses_only_speed_and_central_dimensions() {
+        let mut a = default_campaign().boats.remove(0);
+        a.hull_size = Some((250.0, 30.0));
+        let mut b = a.clone();
+        b.source = "updated-dependencies-and-compiler".into();
+        b.n += 1;
+        b.dt *= 2.0;
+        b.density *= 2.0;
+        b.wind_height += 10.0;
+        b.realistic_wind = !b.realistic_wind;
+        b.waterline += 1.0;
+        b.warmup += 100;
+        b.measure += 100;
+        b.ui = serde_json::json!({"boat":{"container_width":99,"container_height":99}});
+        b.bands.clear();
+        assert_eq!(a.protocol(), b.protocol());
+        b.speed += 0.1;
+        assert_ne!(a.protocol(), b.protocol());
+        b.speed = a.speed;
+        for dimensions in [(251.0, 30.0), (250.0, 31.0)] {
+            b.hull_size = Some(dimensions);
+            assert_ne!(a.protocol(), b.protocol());
+        }
+    }
+    #[test]
+    fn legacy_configs_keep_their_group_without_rewriting_files() {
+        let mut c = default_campaign().boats.remove(0);
+        c.hull_size = Some((250.0, 30.0));
+        c.ui = serde_json::json!({"boat":{"hull_width":250,"hull_height":30,"biblio":false}});
+        let mut old = serde_json::to_value(&c).unwrap();
+        old.as_object_mut().unwrap().remove("hull_size");
+        let loaded = Config::parse(&old.to_string()).unwrap();
+        assert_eq!(c.protocol(), loaded.protocol());
+        assert_eq!(c.bands, loaded.bands);
+    }
+    #[test]
+    fn random_filter_uses_score_bound_and_current_group() {
+        let mut winner = default_campaign().boats.remove(0);
+        winner.hull_size = Some((250.0, 30.0));
+        let mut stats = BTreeMap::new();
+        let mut fx = Stats::default();
+        fx.push(0.0);
+        fx.push(0.0);
+        stats.insert("Fx".into(), fx);
+        let mut panel = Panel::default();
+        panel.entries = vec![Entry {
+            config: winner.clone(),
+            folder: String::new(),
+            status: "completed".into(),
+            samples: 2,
+            stats,
+            source: "old-build".into(),
+        }];
+        let mut bad = winner.clone();
+        bad.bands
+            .retain(|b| !matches!(b.kind, Some(WallKind::Container(_))));
+        assert!(!panel.candidate_can_win(&bad));
+        bad.speed += 1.0;
+        assert!(panel.candidate_can_win(&bad)); // aucune référence pour ce vent
+        let mut promising = winner.clone();
+        promising
+            .bands
+            .retain(|b| !matches!(b.kind, Some(WallKind::BowHull | WallKind::SternHull)));
+        assert!(panel.candidate_can_win(&promising));
+        assert_eq!(
+            panel.weights.optimistic_score(&winner),
+            panel.weights.score(&panel.entries[0])
+        );
+        // Une forte traînée mesurée laisse sa chance à un bateau moins chargé.
+        panel.entries[0].stats.get_mut("Fx").unwrap().mean = 100.0;
+        bad.speed = winner.speed;
+        assert!(panel.candidate_can_win(&bad));
+    }
+    #[test]
     fn zero_residual() {
         let mut g = Grid::new();
         g.project();
@@ -737,6 +862,7 @@ pub enum Action {
 pub struct Panel {
     pub text: String,
     pub code_expanded: bool,
+    pub rankings_open: bool,
     pub name: String,
     pub status: String,
     pub root: String,
@@ -753,6 +879,7 @@ impl Default for Panel {
         let mut p = Self {
             text: String::new(),
             code_expanded: false,
+            rankings_open: false,
             name: "Mon bateau".into(),
             status: String::new(),
             root: "results".into(),
@@ -776,6 +903,20 @@ impl Default for Panel {
     }
 }
 impl Panel {
+    pub fn candidate_can_win(&self, c: &Config) -> bool {
+        // Les poids négatifs rendraient ce majorant invalide.
+        if self.weights.drag < 0.0 {
+            return true;
+        }
+        let key = c.protocol();
+        let best = self
+            .entries
+            .iter()
+            .filter(|e| e.config.protocol() == key)
+            .map(|e| self.weights.score(e))
+            .reduce(f64::max);
+        best.is_none_or(|score| self.weights.optimistic_score(c) > score)
+    }
     pub fn refresh(&mut self) {
         match entries(Path::new(&self.root)) {
             Ok(e) => {
@@ -818,7 +959,14 @@ impl Panel {
                 if ui.button("Mesurer et classer (redémarre à zéro)").clicked(){action=Some(Action::Start);}
                 if ui.button("🎲 Tester et classer un bateau aléatoire").clicked(){action=Some(Action::RandomStart);}
             }
+            ui.small("Essai aléatoire : au moins 50 conteneurs ; jusqu’à 64 tirages pour éviter un candidat incapable de battre le meilleur score, même sans traînée.");
             ui.small("Le calcul conserve le solveur actuel. Score exploratoire, pas une validation physique.");
+            if ui.button("🏆 Classements").clicked() { self.refresh(); self.rankings_open = true; }
+            ui.label(&self.status);
+        });
+        let mut open = self.rankings_open;
+        egui::Window::new("Classements des bateaux").open(&mut open)
+            .default_width(620.0).default_height(500.0).vscroll(true).show(ui.ctx(), |ui| {
             ui.separator();
             ui.label("Score maximal = capacité − traînée − protections");
             for(label,v)in [("Poids capacité",&mut self.weights.capacity),("Poids traînée",&mut self.weights.drag),("Poids protections",&mut self.weights.protection)]{ui.add(egui::Slider::new(v,0.0..=10.0).text(label));}
@@ -831,22 +979,45 @@ impl Panel {
             ui.small("Coût estimé = proue + poupe + carénages + supports (surface 2D), pas un prix en euros. Couple conservé dans les résultats.");
             if ui.button("Actualiser les résultats").clicked(){self.refresh();}
             let mut protocols:Vec<(String,String)>=Vec::new();
-            for e in &self.entries {let key=format!("{}{}",e.source,e.config.protocol());if !protocols.iter().any(|(k,_)|*k==key){protocols.push((key,format!("{} — U={} — {}+{} pas",e.config.name,e.config.speed,e.config.warmup,e.config.measure)));}}
+            for e in &self.entries {let key=e.config.protocol();if !protocols.iter().any(|(k,_)|*k==key){protocols.push((key,e.config.protocol_label()));}}
+            protocols.sort_by(|a,b| a.1.cmp(&b.1));
+            if protocols.is_empty() { ui.label("Aucun essai terminé. Lance une mesure pour créer un classement."); }
             if !protocols.iter().any(|(k,_)|*k==self.protocol){self.protocol=protocols.first().map_or(String::new(),|p|p.0.clone());}
-            egui::ComboBox::from_id_source("score_protocol").selected_text(protocols.iter().find(|p|p.0==self.protocol).map_or("Aucun essai",|p|p.1.as_str())).show_ui(ui,|ui|{for(k,label)in &protocols{ui.selectable_value(&mut self.protocol,k.clone(),label);}});
-            ui.small("Un classement par coque, vent, durée et version de calcul identiques. Plus haut = meilleur.");
-            let mut ranked:Vec<_>=self.entries.iter().filter(|e|format!("{}{}",e.source,e.config.protocol())==self.protocol).collect();
+            egui::CollapsingHeader::new("Tous les classements").default_open(true).show(ui, |ui| {
+                for (key, label) in &protocols {
+                    let count = self.entries.iter().filter(|e| e.config.protocol() == *key).count();
+                    ui.selectable_value(&mut self.protocol, key.clone(), format!("{label} · {count} bateaux"));
+                }
+            });
+            ui.small("Groupes séparés uniquement par dimensions de coque et vitesse d’entrée. Plus haut = meilleur.");
+            let mut ranked:Vec<_>=self.entries.iter().filter(|e|e.config.protocol()==self.protocol).collect();
             ranked.sort_by(|a,b|self.weights.score(b).total_cmp(&self.weights.score(a)));
             if ui.button("Enregistrer ce classement / ces poids").clicked(){let rows:Vec<_>=ranked.iter().map(|e|(*e).clone()).collect();self.status=match save_ranking(Path::new(&self.root),&rows,&self.weights){Ok(())=>"Classement enregistré dans ranking.json".into(),Err(e)=>e.to_string()};}
-            for(rank,e)in ranked.iter().enumerate(){
-                ui.separator();ui.label(format!("#{} {} · score {:.4}",rank+1,e.config.name,self.weights.score(e)));
-                let(n,p,_,_)=e.config.counts();let drag=&e.stats["Fx"];
-                ui.label(format!("{n} conteneurs · Fx {:.5} ± {:.5} · {p} cellules de protection",drag.mean,drag.sd()));
-                ui.small(format!("Résidu moyen {:.2e} · {}",e.stats.get("poisson_residual").map_or(0.0,|s|s.mean),e.folder));
-                ui.horizontal(|ui|{if ui.button(format!("Charger #{}",rank+1)).clicked(){action=Some(Action::Load(e.config.clone()));}if ui.button(format!("Copier #{}",rank+1)).clicked(){if let Ok(t)=e.config.text(){self.text=t.clone();self.code_expanded=false;ui.output_mut(|o|o.copied_text=t);}}});
-            }
-            ui.label(&self.status);
-        });
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                egui::Grid::new("ranking_table").striped(true).show(ui, |ui| {
+                    for title in ["Rang", "Bateau", "Score", "Conteneurs", "Traînée", "Protections", "Actions"] { ui.strong(title); }
+                    ui.end_row();
+                    for (rank,e) in ranked.iter().enumerate() {
+                        let (n,p,_,_) = e.config.counts();
+                        let drag = &e.stats["Fx"];
+                        ui.label(format!("#{}",rank+1));
+                        ui.label(&e.config.name).on_hover_text(&e.folder);
+                        ui.label(format!("{:.4}",self.weights.score(e)));
+                        ui.label(n.to_string());
+                        ui.label(format!("{:.5}",drag.mean)).on_hover_text(format!("Écart type : {:.5}",drag.sd()));
+                        ui.label(p.to_string());
+                        ui.push_id(rank, |ui| { ui.horizontal(|ui| {
+                            if ui.button("Charger").clicked() { action=Some(Action::Load(e.config.clone())); }
+                            if ui.button("Copier").clicked() {
+                                if let Ok(t)=e.config.text() { self.text=t.clone();self.code_expanded=false;ui.output_mut(|o|o.copied_text=t); }
+                            }
+                        }); });
+                        ui.end_row();
+                    }
+                });
+            });
+            });
+        self.rankings_open = open;
         action
     }
     pub fn save(&mut self, c: &Config) -> Result<()> {
