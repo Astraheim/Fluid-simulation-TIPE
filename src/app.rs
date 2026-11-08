@@ -1160,6 +1160,10 @@ pub fn run_app(mut grid: Grid) -> ! {
                     };
 
                     if matches!(experiment_action, Some(crate::experiments::Action::RandomStart)) {
+                        if params.flow_velocity == 0.0 {
+                            params.flow_velocity = 1.1;
+                        }
+                        params.wind_min_height = 260.0;
                         apply_random_boat = true;
                         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
                         experiments.name = format!("Bateau aléatoire {stamp}");
