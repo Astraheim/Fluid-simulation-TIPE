@@ -35,7 +35,7 @@ Chaque essai crée un dossier unique `results/run_…/` sans écraser les préc�
 |---|---|
 | `config.json` | Réglages et géométrie exacte rechargeable, version du format, grille, pas de temps et origine du code |
 | `../manifests/build_….json` (partagé) | Une seule copie des sources techniques, dépendances et conventions par contenu distinct |
-| `summary.json` | Synthèse unique : moyennes, écarts types, statut, nombre de pas, temps, quantités de murs, configuration et score avec sa formule et ses poids |
+| `summary.json` | Synthèse unique : moyennes, écarts types, statut, nombre de pas, temps, quantités de murs et score avec sa formule et ses poids ; aucune copie de la configuration ni de la géométrie |
 
 Les statistiques comprennent : Fx, Fy, couple, traînée des conteneurs, maximum absolu du potentiel de pression, vitesse maximale au centre des cellules, résidu absolu/relatif du Poisson, itérations, débits gauche/droite, flux sortant net sur les quatre côtés, durée du pas (injection + simulation, sans rendu ni écriture), divergence finale maximale, Cx/Cy indicatifs, conteneurs et quantités de cellules solides.
 
@@ -134,3 +134,5 @@ Références consultées :
 - Présentation CMA Ships hébergée par l'OMI : capacités de navires avec 11–12
   étages, à distinguer d'une limite universelle de gerbage.
   https://wwwcdn.imo.org/localresources/en/OurWork/Environment/Documents/Symposium%202021/Presentations/First%20day%20-%20Blocks%201%20and%202/Symposium%20presentations%20-%20First%20Day/Block%201.1%20-%20Xavier%20Leclercq_CMA%20SHIPS%20operating%20LNG-fuelled%20containerships.pdf
+
+Le classement recharge le `config.json` du même dossier pour retrouver le bateau. Conserver les deux fichiers ensemble lors du déplacement d’un essai. Les anciennes synthèses avec configuration intégrée restent lisibles ; le chemin du dossier est déterminé à la lecture.
